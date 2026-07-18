@@ -1,5 +1,5 @@
 <p align="center">                                                                                               
-<img width="128" alt="MDE-iOS-Default-1024x1024@1x" src="https://github.com/user-attachments/assets/88905708-9336-4cfe-8ce8-2be20866e89f" />
+<img width="128" alt="SwiftMarkdownEngine logo" src="media/logo.png" />
 </p>
 
 <h1 align="center">SwiftMarkdownEngine</h1>  
