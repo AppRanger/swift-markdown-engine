@@ -7,7 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-07-22
+
+### Added
+- Custom SF Symbols for task checkboxes: `MarkdownEditorConfiguration` accepts
+  custom unchecked and checked symbols for `- [ ]` / `- [x]` task-list items
+  (opt-in; the defaults are unchanged).
+
 ### Fixed
+- List markers no longer disappear while a selection covers them, and selecting
+  a list item now reveals its raw marker syntax like other inline constructs.
 - An unclosed ``` fence no longer swallows the rest of the document: typing an
   opening fence above existing content left every block below it (tables,
   block LaTeX, thematic breaks, links) unrendered until the closing fence was
