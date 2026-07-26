@@ -68,13 +68,9 @@ enum MarkdownASTStyler {
             wikiLinkID: wikiLinkIDProvider,
             scopedRanges: scopedRanges
         )
-        let blocks = OpenTrace.span("ENG-8g1a DocumentAST.parse") {
-            DocumentAST.parse(text, scopedRanges: scopedRanges, precomputedBlocks: precomputedBlocks,
-                              registry: configuration.extensionRegistry)
-        }
+        let blocks = DocumentAST.parse(text, scopedRanges: scopedRanges, precomputedBlocks: precomputedBlocks,
+                                       registry: configuration.extensionRegistry)
         // precomputed=0 ⇒ the document is parsed a SECOND time here (the rebuild already parsed it).
-        OpenTrace.annotateLast("ENG-8g1a DocumentAST.parse",
-                               "precomputed=\(precomputedBlocks == nil ? 0 : 1) blocks=\(blocks.count)")
         var attrs: [StyledRange] = []
         for block in blocks where ctx.inScope(block.range) {
             styleBlock(block, font: baseFont, ctx: ctx, into: &attrs)
@@ -284,13 +280,6 @@ enum MarkdownASTStyler {
     }
 
     private static func styleAutoLinks(ctx: Ctx, codeRanges: [NSRange], linkRanges: [NSRange], into attrs: inout [StyledRange]) {
-        // push/defer/pop, not span: the detector guard below is an early return.
-        let tracedRanges = attrs.count
-        OpenTrace.push("ENG-8g1b styleAutoLinks")
-        defer {
-            let hits = attrs.count - tracedRanges
-            OpenTrace.pop("ENG-8g1b styleAutoLinks", "chars=\(ctx.ns.length) hits=\(hits)")
-        }
         guard let detector = autoLinkDetector else { return }
         for scan in ctx.scanRanges {
             detector.enumerateMatches(in: ctx.text, range: scan) { match, _, _ in
@@ -305,15 +294,8 @@ enum MarkdownASTStyler {
     }
 
     private static func styleIncompleteLinkBrackets(ctx: Ctx, codeRanges: [NSRange], checkboxRanges: [NSRange], into attrs: inout [StyledRange]) {
-        // `ranges`, not `hits`: this pass appends one range PER CHARACTER of every match.
-        let tracedRanges = attrs.count
-        OpenTrace.push("ENG-8g1c incompleteLinkBrackets")
-        defer {
-            let ranges = attrs.count - tracedRanges
-            OpenTrace.pop("ENG-8g1c incompleteLinkBrackets", "chars=\(ctx.ns.length) ranges=\(ranges)")
-        }
         // Every pattern starts with `\[`, so no `[` in the text ⇒ no match: skip
-        // all 6 regex sweeps (the 78ms on hits=0 docs, ENG-8g1c).
+        // all 6 regex sweeps (the 78ms on hits=0 docs).
         guard ctx.ns.range(of: "[").location != NSNotFound else { return }
         let muted = ctx.theme.mutedText
         let faded = ctx.theme.incompleteLink.withAlphaComponent(ctx.config.link.incompleteLinkAlpha)
@@ -539,16 +521,11 @@ enum MarkdownASTStyler {
         // Suppress spell-check underlines on the whole fenced block — code is not prose.
         attrs.append((parts.codeRange, [.spellingState: 0]))
         let codeContent = ctx.ns.substring(with: parts.content)
-        // Explicit closure argument (no trailing closure): this is an `if` condition.
         if !codeContent.isEmpty,
-           let highlighted = OpenTrace.accumulate("ENG-8g1d syntaxHighlight", {
-               ctx.config.services.syntaxHighlighter.highlight(code: codeContent, language: parts.language)
-           }) {
-            OpenTrace.accumulate("ENG-8g1e highlightAttrCopy") {
-                highlighted.enumerateAttributes(in: NSRange(location: 0, length: highlighted.length)) { a, r, _ in
-                    guard let fg = a[.foregroundColor] else { return }
-                    attrs.append((NSRange(location: parts.content.location + r.location, length: r.length), [.foregroundColor: fg]))
-                }
+           let highlighted = ctx.config.services.syntaxHighlighter.highlight(code: codeContent, language: parts.language) {
+            highlighted.enumerateAttributes(in: NSRange(location: 0, length: highlighted.length)) { a, r, _ in
+                guard let fg = a[.foregroundColor] else { return }
+                attrs.append((NSRange(location: parts.content.location + r.location, length: r.length), [.foregroundColor: fg]))
             }
         }
         // Use the whole block range (not codeRange): an incomplete fence collapses codeRange to the ```.

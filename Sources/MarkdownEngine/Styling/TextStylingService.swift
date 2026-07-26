@@ -107,7 +107,6 @@ struct TextStylingService {
         }
         let spellMs = Double(DispatchTime.now().uptimeNanoseconds - spellT0) / 1_000_000
         let attrT0 = DispatchTime.now().uptimeNanoseconds
-        OpenTrace.push("ENG-8b4 restyle.apply")
         applyStyledRanges(
             styledRanges,
             paragraphs: paragraphs,
@@ -118,8 +117,6 @@ struct TextStylingService {
             ],
             to: textView.textStorage
         )
-        OpenTrace.pop("ENG-8b4 restyle.apply",
-                      "paragraphs=\(paragraphs.count) styledRanges=\(styledRanges.count)")
         textView.textStorage?.endEditing()
         let attrMs = Double(DispatchTime.now().uptimeNanoseconds - attrT0) / 1_000_000
         // No ensureLayout here:

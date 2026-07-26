@@ -243,34 +243,23 @@ enum MarkdownStyler {
         )
 
         var result: [StyledRange] = []
-        // Each sub-pass `+=`s into the same array, so its own range count is the delta
-        // from this mark; annotateLast fires after the span already closed.
-        var tracedRanges = 0
         // AST-native styler handles everything but NSImage rendering (incl. the composition fixes).
         let astT0 = DispatchTime.now().uptimeNanoseconds
-        result += OpenTrace.span("ENG-8g1 ASTStyler") {
-            MarkdownASTStyler.styleAttributes(
-                text: text, fontName: fontName, fontSize: fontSize,
-                caretLocation: caretLocation, selection: selection, wikiLinkIDProvider: wikiLinkIDProvider,
-                scopedRanges: scopedRanges, precomputedBlocks: precomputedBlocks,
-                configuration: configuration
-            )
-        }
-        OpenTrace.annotateLast("ENG-8g1 ASTStyler", "ranges=\(result.count - tracedRanges)"); tracedRanges = result.count
+        result += MarkdownASTStyler.styleAttributes(
+            text: text, fontName: fontName, fontSize: fontSize,
+            caretLocation: caretLocation, selection: selection, wikiLinkIDProvider: wikiLinkIDProvider,
+            scopedRanges: scopedRanges, precomputedBlocks: precomputedBlocks,
+            configuration: configuration
+        )
         let astMs = Double(DispatchTime.now().uptimeNanoseconds - astT0) / 1_000_000
         // NSImage rendering reuses the existing, proven machinery.
         let imgT0 = DispatchTime.now().uptimeNanoseconds
-        result += OpenTrace.span("ENG-8g2a blockLatex") { styleBlockLatex(ctx) }
-        OpenTrace.annotateLast("ENG-8g2a blockLatex", "ranges=\(result.count - tracedRanges)"); tracedRanges = result.count
-        result += OpenTrace.span("ENG-8g2b inlineLatex") { styleInlineLatex(ctx) }
-        OpenTrace.annotateLast("ENG-8g2b inlineLatex", "ranges=\(result.count - tracedRanges)"); tracedRanges = result.count
-        result += OpenTrace.span("ENG-8g2c imageEmbeds") { styleImageEmbeds(ctx) }
-        OpenTrace.annotateLast("ENG-8g2c imageEmbeds", "ranges=\(result.count - tracedRanges)"); tracedRanges = result.count
-        result += OpenTrace.span("ENG-8g2d imageLinks") { styleImageLinks(ctx) }
-        OpenTrace.annotateLast("ENG-8g2d imageLinks", "ranges=\(result.count - tracedRanges)"); tracedRanges = result.count
+        result += styleBlockLatex(ctx)
+        result += styleInlineLatex(ctx)
+        result += styleImageEmbeds(ctx)
+        result += styleImageLinks(ctx)
         let imgMs = Double(DispatchTime.now().uptimeNanoseconds - imgT0) / 1_000_000
-        result += OpenTrace.span("ENG-8g2e tables") { styleTables(ctx) }
-        OpenTrace.annotateLast("ENG-8g2e tables", "ranges=\(result.count - tracedRanges)"); tracedRanges = result.count
+        result += styleTables(ctx)
         PerfTrace.note { "  styleAttributes: ast=\(String(format: "%.2f", astMs))ms latex+img4=\(String(format: "%.2f", imgMs))ms styledRanges=\(result.count)" }
         return result
     }
