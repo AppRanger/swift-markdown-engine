@@ -68,8 +68,13 @@ enum MarkdownASTStyler {
             wikiLinkID: wikiLinkIDProvider,
             scopedRanges: scopedRanges
         )
-        let blocks = DocumentAST.parse(text, scopedRanges: scopedRanges, precomputedBlocks: precomputedBlocks,
-                                       registry: configuration.extensionRegistry)
+        let blocks = OpenTrace.span("ENG-8g1a DocumentAST.parse") {
+            DocumentAST.parse(text, scopedRanges: scopedRanges, precomputedBlocks: precomputedBlocks,
+                              registry: configuration.extensionRegistry)
+        }
+        // precomputed=0 ⇒ the document is parsed a SECOND time here (the rebuild already parsed it).
+        OpenTrace.annotateLast("ENG-8g1a DocumentAST.parse",
+                               "precomputed=\(precomputedBlocks == nil ? 0 : 1) blocks=\(blocks.count)")
         var attrs: [StyledRange] = []
         for block in blocks where ctx.inScope(block.range) {
             styleBlock(block, font: baseFont, ctx: ctx, into: &attrs)
@@ -170,6 +175,13 @@ enum MarkdownASTStyler {
         try? NSRegularExpression(pattern: pattern, options: anchored ? [.anchorsMatchLines] : [])
     }
 
+    // Built once, reused: rebuilding these on every restyle cost 43ms (detector)
+    // + 78ms (6 regexes) on a 346k note with hits=0 (ENG-8g1b/c).
+    private static let autoLinkDetector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
+    private static let incompleteLinkPatterns: [NSRegularExpression] =
+        [#"\[\]"#, #"\[\[\]\]"#, #"\[[^\]\r\n]*$"#, #"\[[^\]\r\n]+\](?!\()"#,
+         #"\[[^\]\r\n]+\]\([^)\r\n]*$"#, #"\[[^\]\r\n]+\]\(\)"#].compactMap { regex($0, false) }
+
     /// Tag a thematic-break line for a full-width rule (AST-driven); suppressed while the caret edits it.
     private static func styleThematicBreak(range: NSRange, ctx: Ctx, into attrs: inout [StyledRange]) {
         var hr = range
@@ -220,8 +232,8 @@ enum MarkdownASTStyler {
             markerGroup = NSRange(location: item.marker.location,
                                   length: item.contentRange.location - item.marker.location)
         }
-        let markerWidth = (ctx.ns.substring(with: markerGroup) as NSString)
-            .size(withAttributes: [.font: ctx.baseFont]).width
+        // Via the memoized measure — list markers are a tiny repeated set (`- `, `1. `).
+        let markerWidth = HeadingHelpers.textWidth(ctx.ns.substring(with: markerGroup), font: ctx.baseFont)
         let depthIndent = CGFloat(MarkdownLists.indentLevel(from: ws)) * ctx.config.lists.indentPerLevel
         let ps = NSMutableParagraphStyle()
         let lineHeight = ctx.baseLineHeight + ctx.config.lists.extraLineHeight
@@ -272,7 +284,14 @@ enum MarkdownASTStyler {
     }
 
     private static func styleAutoLinks(ctx: Ctx, codeRanges: [NSRange], linkRanges: [NSRange], into attrs: inout [StyledRange]) {
-        guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) else { return }
+        // push/defer/pop, not span: the detector guard below is an early return.
+        let tracedRanges = attrs.count
+        OpenTrace.push("ENG-8g1b styleAutoLinks")
+        defer {
+            let hits = attrs.count - tracedRanges
+            OpenTrace.pop("ENG-8g1b styleAutoLinks", "chars=\(ctx.ns.length) hits=\(hits)")
+        }
+        guard let detector = autoLinkDetector else { return }
         for scan in ctx.scanRanges {
             detector.enumerateMatches(in: ctx.text, range: scan) { match, _, _ in
                 // Skip URLs inside code and inside a markdown/wiki link's own range — a link's
@@ -286,19 +305,44 @@ enum MarkdownASTStyler {
     }
 
     private static func styleIncompleteLinkBrackets(ctx: Ctx, codeRanges: [NSRange], checkboxRanges: [NSRange], into attrs: inout [StyledRange]) {
-        let patterns = [#"\[\]"#, #"\[\[\]\]"#, #"\[[^\]\r\n]*$"#, #"\[[^\]\r\n]+\](?!\()"#,
-                        #"\[[^\]\r\n]+\]\([^)\r\n]*$"#, #"\[[^\]\r\n]+\]\(\)"#]
+        // `ranges`, not `hits`: this pass appends one range PER CHARACTER of every match.
+        let tracedRanges = attrs.count
+        OpenTrace.push("ENG-8g1c incompleteLinkBrackets")
+        defer {
+            let ranges = attrs.count - tracedRanges
+            OpenTrace.pop("ENG-8g1c incompleteLinkBrackets", "chars=\(ctx.ns.length) ranges=\(ranges)")
+        }
+        // Every pattern starts with `\[`, so no `[` in the text ⇒ no match: skip
+        // all 6 regex sweeps (the 78ms on hits=0 docs, ENG-8g1c).
+        guard ctx.ns.range(of: "[").location != NSNotFound else { return }
         let muted = ctx.theme.mutedText
         let faded = ctx.theme.incompleteLink.withAlphaComponent(ctx.config.link.incompleteLinkAlpha)
-        for pattern in patterns {
-            guard let re = regex(pattern, false) else { continue }
+        for re in incompleteLinkPatterns {
             for scan in ctx.scanRanges {
               for m in re.matches(in: ctx.text, options: [], range: scan)
                   where !isInCode(m.range, codeRanges) && !isInCode(m.range, checkboxRanges) {
-                for (i, ch) in ctx.ns.substring(with: m.range).enumerated() {
-                    let r = NSRange(location: m.range.location + i, length: 1)
+                // One range per RUN of same-colored characters, not per character: a
+                // single `[Design System]` used to emit 15 ranges, and the note in the
+                // bug report reached 25,504 from this pass alone — every one of them a
+                // separate storage mutation downstream.
+                var runStart = m.range.location
+                var runLength = 0
+                var runIsBracket = false
+                for ch in ctx.ns.substring(with: m.range) {
                     let isBracket = ch == "[" || ch == "]" || ch == "(" || ch == ")"
-                    attrs.append((r, [.foregroundColor: isBracket ? muted : faded]))
+                    let width = ch.utf16.count
+                    if runLength > 0, isBracket != runIsBracket {
+                        attrs.append((NSRange(location: runStart, length: runLength),
+                                      [.foregroundColor: runIsBracket ? muted : faded]))
+                        runStart += runLength
+                        runLength = 0
+                    }
+                    runIsBracket = isBracket
+                    runLength += width
+                }
+                if runLength > 0 {
+                    attrs.append((NSRange(location: runStart, length: runLength),
+                                  [.foregroundColor: runIsBracket ? muted : faded]))
                 }
               }
             }
@@ -495,11 +539,16 @@ enum MarkdownASTStyler {
         // Suppress spell-check underlines on the whole fenced block — code is not prose.
         attrs.append((parts.codeRange, [.spellingState: 0]))
         let codeContent = ctx.ns.substring(with: parts.content)
+        // Explicit closure argument (no trailing closure): this is an `if` condition.
         if !codeContent.isEmpty,
-           let highlighted = ctx.config.services.syntaxHighlighter.highlight(code: codeContent, language: parts.language) {
-            highlighted.enumerateAttributes(in: NSRange(location: 0, length: highlighted.length)) { a, r, _ in
-                guard let fg = a[.foregroundColor] else { return }
-                attrs.append((NSRange(location: parts.content.location + r.location, length: r.length), [.foregroundColor: fg]))
+           let highlighted = OpenTrace.accumulate("ENG-8g1d syntaxHighlight", {
+               ctx.config.services.syntaxHighlighter.highlight(code: codeContent, language: parts.language)
+           }) {
+            OpenTrace.accumulate("ENG-8g1e highlightAttrCopy") {
+                highlighted.enumerateAttributes(in: NSRange(location: 0, length: highlighted.length)) { a, r, _ in
+                    guard let fg = a[.foregroundColor] else { return }
+                    attrs.append((NSRange(location: parts.content.location + r.location, length: r.length), [.foregroundColor: fg]))
+                }
             }
         }
         // Use the whole block range (not codeRange): an incomplete fence collapses codeRange to the ```.

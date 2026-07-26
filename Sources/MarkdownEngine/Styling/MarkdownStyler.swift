@@ -117,6 +117,83 @@ typealias StyledRange = (range: NSRange, attributes: [NSAttributedString.Key: An
 
 enum MarkdownStyler {
 
+    /// Collapses styler output into non-overlapping runs, ascending, so a caller can
+    /// write each character range to the text storage exactly once.
+    ///
+    /// The styler emits ranges pass by pass, so they arrive unordered and heavily
+    /// overlapping. Applying them with one `addAttribute` per key per range mutates
+    /// the storage once per pair — 89,916 times on a 346k-char note — and every
+    /// mutation re-splits the attribute-run array, so the cost of a single call grows
+    /// with the runs already present: measured 0.54µs/call on a 437-char note against
+    /// 213µs/call on the big one. That quadratic was 19.1s of a 21s open. Writing
+    /// left to right instead only ever splits the trailing run.
+    ///
+    /// Semantics are identical to the loop it replaces: later ranges win per key, and
+    /// `base` fills what no range covers (the caller applies it to the whole document
+    /// first, so each returned run must carry it too — `setAttributes` replaces).
+    static func flattenedRuns(
+        _ ranges: [StyledRange],
+        base: [NSAttributedString.Key: Any],
+        documentLength: Int
+    ) -> [StyledRange] {
+        // (position, isStart, emission index). Ends sort before starts at the same
+        // position so a range ending where the next begins doesn't briefly overlap it.
+        var events: [(pos: Int, isStart: Bool, idx: Int)] = []
+        events.reserveCapacity(ranges.count * 2)
+        for (i, styled) in ranges.enumerated() {
+            let r = styled.range
+            guard r.location != NSNotFound, r.location >= 0, r.length > 0,
+                  NSMaxRange(r) <= documentLength else { continue }
+            events.append((r.location, true, i))
+            events.append((NSMaxRange(r), false, i))
+        }
+        guard !events.isEmpty else { return [] }
+        events.sort { a, b in
+            if a.pos != b.pos { return a.pos < b.pos }
+            if a.isStart != b.isStart { return !a.isStart }
+            return a.idx < b.idx
+        }
+
+        var runs: [StyledRange] = []
+        runs.reserveCapacity(min(events.count, 4096))
+        // Emission indices of the ranges covering the current position, kept ascending
+        // so merging them in order reproduces "later range wins".
+        var active: [Int] = []
+        var cursor = events[0].pos
+        var i = 0
+        while i < events.count {
+            let pos = events[i].pos
+            if pos > cursor, !active.isEmpty {
+                var attrs = base
+                for idx in active {
+                    attrs.merge(ranges[idx].attributes) { _, newer in newer }
+                }
+                let run = NSRange(location: cursor, length: pos - cursor)
+                // Adjacent runs frequently carry identical attributes — one styling
+                // pass emits a separate range per character — so coalesce before the
+                // write instead of paying a storage mutation per character.
+                if let last = runs.last, NSMaxRange(last.range) == run.location,
+                   (last.attributes as NSDictionary).isEqual(to: attrs) {
+                    runs[runs.count - 1].range.length += run.length
+                } else {
+                    runs.append((run, attrs))
+                }
+            }
+            while i < events.count, events[i].pos == pos {
+                let event = events[i]
+                if event.isStart {
+                    let slot = active.firstIndex { $0 > event.idx } ?? active.count
+                    active.insert(event.idx, at: slot)
+                } else if let slot = active.firstIndex(of: event.idx) {
+                    active.remove(at: slot)
+                }
+                i += 1
+            }
+            cursor = pos
+        }
+        return runs
+    }
+
     static func styleAttributes(
         text: String,
         fontName: String,
@@ -166,23 +243,34 @@ enum MarkdownStyler {
         )
 
         var result: [StyledRange] = []
+        // Each sub-pass `+=`s into the same array, so its own range count is the delta
+        // from this mark; annotateLast fires after the span already closed.
+        var tracedRanges = 0
         // AST-native styler handles everything but NSImage rendering (incl. the composition fixes).
         let astT0 = DispatchTime.now().uptimeNanoseconds
-        result += MarkdownASTStyler.styleAttributes(
-            text: text, fontName: fontName, fontSize: fontSize,
-            caretLocation: caretLocation, selection: selection, wikiLinkIDProvider: wikiLinkIDProvider,
-            scopedRanges: scopedRanges, precomputedBlocks: precomputedBlocks,
-            configuration: configuration
-        )
+        result += OpenTrace.span("ENG-8g1 ASTStyler") {
+            MarkdownASTStyler.styleAttributes(
+                text: text, fontName: fontName, fontSize: fontSize,
+                caretLocation: caretLocation, selection: selection, wikiLinkIDProvider: wikiLinkIDProvider,
+                scopedRanges: scopedRanges, precomputedBlocks: precomputedBlocks,
+                configuration: configuration
+            )
+        }
+        OpenTrace.annotateLast("ENG-8g1 ASTStyler", "ranges=\(result.count - tracedRanges)"); tracedRanges = result.count
         let astMs = Double(DispatchTime.now().uptimeNanoseconds - astT0) / 1_000_000
         // NSImage rendering reuses the existing, proven machinery.
         let imgT0 = DispatchTime.now().uptimeNanoseconds
-        result += styleBlockLatex(ctx)
-        result += styleInlineLatex(ctx)
-        result += styleImageEmbeds(ctx)
-        result += styleImageLinks(ctx)
+        result += OpenTrace.span("ENG-8g2a blockLatex") { styleBlockLatex(ctx) }
+        OpenTrace.annotateLast("ENG-8g2a blockLatex", "ranges=\(result.count - tracedRanges)"); tracedRanges = result.count
+        result += OpenTrace.span("ENG-8g2b inlineLatex") { styleInlineLatex(ctx) }
+        OpenTrace.annotateLast("ENG-8g2b inlineLatex", "ranges=\(result.count - tracedRanges)"); tracedRanges = result.count
+        result += OpenTrace.span("ENG-8g2c imageEmbeds") { styleImageEmbeds(ctx) }
+        OpenTrace.annotateLast("ENG-8g2c imageEmbeds", "ranges=\(result.count - tracedRanges)"); tracedRanges = result.count
+        result += OpenTrace.span("ENG-8g2d imageLinks") { styleImageLinks(ctx) }
+        OpenTrace.annotateLast("ENG-8g2d imageLinks", "ranges=\(result.count - tracedRanges)"); tracedRanges = result.count
         let imgMs = Double(DispatchTime.now().uptimeNanoseconds - imgT0) / 1_000_000
-        result += styleTables(ctx)
+        result += OpenTrace.span("ENG-8g2e tables") { styleTables(ctx) }
+        OpenTrace.annotateLast("ENG-8g2e tables", "ranges=\(result.count - tracedRanges)"); tracedRanges = result.count
         PerfTrace.note { "  styleAttributes: ast=\(String(format: "%.2f", astMs))ms latex+img4=\(String(format: "%.2f", imgMs))ms styledRanges=\(result.count)" }
         return result
     }

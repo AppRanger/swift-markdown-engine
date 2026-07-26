@@ -297,7 +297,12 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         scrollView.documentView = container
         // Force full-document layout at init so paragraph heights are known
         // upfront; otherwise TextKit 2 viewport layout causes scroll drift.
-        textLayoutManager.ensureLayout(for: textLayoutManager.documentRange)
+        // Earliest engine-side hook: reports whether tracing is armed at all, so
+        // "no output" is never ambiguous.
+        OpenTrace.announce("makeNSView")
+        OpenTrace.span("ENG-0 makeNSView.ensureLayout", "chars=\((textView.string as NSString).length)") {
+            textLayoutManager.ensureLayout(for: textLayoutManager.documentRange)
+        }
 
         scrollView.contentView.scroll(to: NSPoint(x: 0, y: -scrollView.contentInsets.top))
         scrollView.clampToInsets()
@@ -370,11 +375,34 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         return scrollView
     }
 
+    /// TEMP (OpenTrace): pass counter, so the trace shows how many update passes
+    /// one open actually costs.
+    private static var openTracePass = 0
+
     public func updateNSView(_ nsView: NSScrollView, context: Context) {
-        guard let textView = nsView.nativeTextView else { return }
-        reconcileHeader(textView: textView, context: context)
+        // Fallback arm: if the embedder's open funnel never opened a trace, still
+        // trace the engine half of a document switch rather than printing nothing.
+        if !OpenTrace.isOpen, context.coordinator.documentId != documentId {
+            OpenTrace.beginOpen("armed-by-engine doc=\(documentId) chars=\((text as NSString).length)")
+        }
+        Self.openTracePass &+= 1
+        let openTracePass = Self.openTracePass
+        OpenTrace.push("ENG-1 updateNSView")
+        guard let textView = nsView.nativeTextView else {
+            OpenTrace.pop("ENG-1 updateNSView", "pass=\(openTracePass) noTextView")
+            return
+        }
+        OpenTrace.span("ENG-2 reconcileHeader") {
+            reconcileHeader(textView: textView, context: context)
+        }
 
         let isNodeSwitch = context.coordinator.documentId != documentId
+        // Registered after `isNodeSwitch` (the detail reads it) but still before
+        // every early return below, so `defer` closes the span on all exits.
+        defer {
+            OpenTrace.pop("ENG-1 updateNSView",
+                          "pass=\(openTracePass) switch=\(isNodeSwitch) text=\((text as NSString).length) store=\((textView.string as NSString).length)")
+        }
 
         // Drop remembered offsets for documents no longer retained (always keep
         // the current one). Only rebuilds the dict when something must go.
@@ -418,6 +446,7 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
             // change while Writing Tools is active won't take effect until the
             // session ends. WT sessions are transient and height-mode switches
             // during one are not a supported use case.
+            OpenTrace.mark("ENG-1r earlyReturn", "at=442")
             return
         }
 
@@ -498,23 +527,32 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         // (e.g. when the available wiki-link targets change). Cheap pointer-/
         // value-based comparison; full equality isn't required because the
         // embedder is the source of truth.
-        let newImageFingerprint = configuration.services.images.fingerprint()
-        let newWikiFingerprint = configuration.services.wikiLinks.fingerprint()
-        let imageChanged = newImageFingerprint != context.coordinator.lastImageFingerprint
-        let wikiChanged = newWikiFingerprint != context.coordinator.lastWikiFingerprint
-        if imageChanged || wikiChanged {
-            context.coordinator.lastImageFingerprint = newImageFingerprint
-            context.coordinator.lastWikiFingerprint = newWikiFingerprint
-            context.coordinator.configuration.services = configuration.services
-            textView.configuration.services = configuration.services
-            // Only an image change needs a layout re-measure; a wiki-link rename is style-only.
-            if imageChanged, let tlm = textView.textLayoutManager {
-                tlm.invalidateLayout(for: tlm.documentRange)
-            }
-            // Restyle live tv content — full rebuild would clobber paste-fresh embeds when `text` binding hasn't caught up.
-            let fullRange = NSRange(location: 0, length: (textView.string as NSString).length)
-            if fullRange.length > 0 {
-                context.coordinator.restyleParagraphs([fullRange], in: textView)
+        // `restyledChars` stays 0 when the conditional full-document restyle is
+        // skipped; non-zero means a SECOND full parse+style ran this pass.
+        var restyledChars = 0
+        var restyleFired = false
+        OpenTrace.span("ENG-3 servicesFingerprint",
+                       "restyle=\(restyleFired) chars=\(restyledChars)") {
+            let newImageFingerprint = configuration.services.images.fingerprint()
+            let newWikiFingerprint = configuration.services.wikiLinks.fingerprint()
+            let imageChanged = newImageFingerprint != context.coordinator.lastImageFingerprint
+            let wikiChanged = newWikiFingerprint != context.coordinator.lastWikiFingerprint
+            if imageChanged || wikiChanged {
+                context.coordinator.lastImageFingerprint = newImageFingerprint
+                context.coordinator.lastWikiFingerprint = newWikiFingerprint
+                context.coordinator.configuration.services = configuration.services
+                textView.configuration.services = configuration.services
+                // Only an image change needs a layout re-measure; a wiki-link rename is style-only.
+                if imageChanged, let tlm = textView.textLayoutManager {
+                    tlm.invalidateLayout(for: tlm.documentRange)
+                }
+                // Restyle live tv content — full rebuild would clobber paste-fresh embeds when `text` binding hasn't caught up.
+                let fullRange = NSRange(location: 0, length: (textView.string as NSString).length)
+                if fullRange.length > 0 {
+                    restyleFired = true
+                    restyledChars = fullRange.length
+                    context.coordinator.restyleParagraphs([fullRange], in: textView)
+                }
             }
         }
         textView.isEditable = isEditable
@@ -531,55 +569,70 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
                     self.pendingInlineReplacement = nil
                 }
             }
+            OpenTrace.mark("ENG-1r earlyReturn", "at=565")
             return
         }
         if context.coordinator.didInitialFormatting
             && context.coordinator.lastSyncedText == text
             && !fontChanged {
+            OpenTrace.mark("ENG-1r earlyReturn", "at=571")
             return
         }
         if fontChanged {
             context.coordinator.didInitialFormatting = false
         }
-        if isNodeSwitch {
-            // Save the outgoing document's scroll position — unless it just left
-            // the retained set, in which case let it reset to top next time.
-            if let outgoingId = context.coordinator.documentId,
-               retainedScrollDocumentIds?.contains(outgoingId) ?? true {
-                context.coordinator.scrollOffsets[outgoingId] = nsView.contentView.bounds.origin.y
+        OpenTrace.span("ENG-5 nodeSwitchBlock", "switch=\(isNodeSwitch)") {
+            if isNodeSwitch {
+                // Save the outgoing document's scroll position — unless it just left
+                // the retained set, in which case let it reset to top next time.
+                if let outgoingId = context.coordinator.documentId,
+                   retainedScrollDocumentIds?.contains(outgoingId) ?? true {
+                    context.coordinator.scrollOffsets[outgoingId] = nsView.contentView.bounds.origin.y
+                }
+                // Snapshot the outgoing document's content (storage form) so a later
+                // switch-back can detect a file rewritten while it was backgrounded.
+                // `lastSyncedText` still holds the outgoing content here.
+                if let outgoingId = context.coordinator.documentId {
+                    context.coordinator.undoContentSnapshots[outgoingId] = context.coordinator.lastSyncedText
+                }
+                // Per-document undo: close the OUTGOING document's open coalescing group
+                // (while its manager is still active), then switch the active documentId so
+                // `undoManager(for:)` starts vending the INCOMING document's own manager. We
+                // no longer clear undo here — that `removeAllActions()` is what killed Cmd+Z
+                // across a file switch.
+                textView.breakUndoCoalescing()
+                context.coordinator.documentId = documentId
+                // Drop the incoming document's undo stack if its text changed while
+                // switched away — its recorded ranges are now stale.
+                context.coordinator.invalidateUndoIfContentDiverged(for: documentId, incomingText: text)
+                context.coordinator.didInitialFormatting = false
+                context.coordinator.didEnsureLayoutForCurrentDocument = false
+                context.coordinator.resetImageEmbedState()
+                // Drop old document's wide-table overlays synchronously.
+                textView.removeAllWideTableOverlays()
+                // Park at top during the rebuild; the new document's own saved offset
+                // (if any) is restored after its height is known (see below).
+                nsView.contentView.scroll(to: NSPoint(x: 0, y: -nsView.contentInsets.top))
+                nsView.reflectScrolledClipView(nsView.contentView)
+                (nsView as? ClampedScrollView)?.clampToInsets()
             }
-            // Snapshot the outgoing document's content (storage form) so a later
-            // switch-back can detect a file rewritten while it was backgrounded.
-            // `lastSyncedText` still holds the outgoing content here.
-            if let outgoingId = context.coordinator.documentId {
-                context.coordinator.undoContentSnapshots[outgoingId] = context.coordinator.lastSyncedText
-            }
-            // Per-document undo: close the OUTGOING document's open coalescing group
-            // (while its manager is still active), then switch the active documentId so
-            // `undoManager(for:)` starts vending the INCOMING document's own manager. We
-            // no longer clear undo here — that `removeAllActions()` is what killed Cmd+Z
-            // across a file switch.
-            textView.breakUndoCoalescing()
-            context.coordinator.documentId = documentId
-            // Drop the incoming document's undo stack if its text changed while
-            // switched away — its recorded ranges are now stale.
-            context.coordinator.invalidateUndoIfContentDiverged(for: documentId, incomingText: text)
-            context.coordinator.didInitialFormatting = false
-            context.coordinator.didEnsureLayoutForCurrentDocument = false
-            context.coordinator.resetImageEmbedState()
-            // Drop old document's wide-table overlays synchronously.
-            textView.removeAllWideTableOverlays()
-            // Park at top during the rebuild; the new document's own saved offset
-            // (if any) is restored after its height is known (see below).
-            nsView.contentView.scroll(to: NSPoint(x: 0, y: -nsView.contentInsets.top))
-            nsView.reflectScrolledClipView(nsView.contentView)
-            (nsView as? ClampedScrollView)?.clampToInsets()
         }
 
         let font = NSFont(name: fontName, size: fontSize) ?? NSFont.systemFont(ofSize: fontSize)
-        textView.font = font
-        textView.baseFont = font
-        textView.recalcOverscroll(for: nsView)
+        OpenTrace.span("ENG-6 fontSet", "store=\((textView.string as NSString).length)") {
+            textView.font = font
+            textView.baseFont = font
+        }
+        OpenTrace.span("ENG-7 recalcOverscroll#1") {
+            // Skip on switch: textView.string still holds the OUTGOING doc here, so the "?"
+            // tag would force a full ensureLayout of the doc about to be discarded (~274ms /
+            // 7714 frags @346k). recalcOverscroll#2 after the rebuild measures the new doc;
+            // scroll is parked at top so clampToInsets below stays in range. Non-switch
+            // updates (font change, typing) must keep the forced full layout.
+            if !isNodeSwitch {
+                textView.recalcOverscroll(for: nsView)
+            }
+        }
         (nsView as? ClampedScrollView)?.clampToInsets()
 
         // Sync coordinator's font fields BEFORE the rebuild so the helper
@@ -591,14 +644,18 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
             from: text,
             invalidateLayout: isNodeSwitch || rawSourceModeChanged
         )
-        textView.recalcOverscroll(for: nsView)
+        OpenTrace.span("ENG-9 recalcOverscroll#2") {
+            textView.recalcOverscroll(for: nsView)
+        }
         (nsView as? ClampedScrollView)?.clampToInsets()
         // Height is measured now, so restore the saved offset; clampToInsets keeps
         // it in range if the document got shorter.
-        if isNodeSwitch, let savedY = context.coordinator.scrollOffsets[documentId] {
-            nsView.contentView.scroll(to: NSPoint(x: nsView.contentView.bounds.origin.x, y: savedY))
-            nsView.reflectScrolledClipView(nsView.contentView)
-            (nsView as? ClampedScrollView)?.clampToInsets()
+        OpenTrace.span("ENG-10 scrollRestore", "switch=\(isNodeSwitch)") {
+            if isNodeSwitch, let savedY = context.coordinator.scrollOffsets[documentId] {
+                nsView.contentView.scroll(to: NSPoint(x: nsView.contentView.bounds.origin.x, y: savedY))
+                nsView.reflectScrolledClipView(nsView.contentView)
+                (nsView as? ClampedScrollView)?.clampToInsets()
+            }
         }
         // Document rebuilds bypass textDidChange — re-derive emptiness here.
         textView.refreshPlaceholderVisibility()
@@ -612,6 +669,7 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         context.coordinator.onInlinePreviewKey = onInlinePreviewKey
         context.coordinator.onCodeBlockSelectionChange = onCodeBlockSelectionChange
         context.coordinator.didInitialFormatting = true
+        OpenTrace.markInteractive()
     }
 
     public func makeCoordinator() -> Coordinator {

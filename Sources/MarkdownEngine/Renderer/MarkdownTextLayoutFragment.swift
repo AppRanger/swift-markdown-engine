@@ -626,13 +626,19 @@ final class MarkdownTextLayoutFragment: NSTextLayoutFragment {
 // MARK: - Layout Manager Delegate
 
 final class MarkdownLayoutManagerDelegate: NSObject, NSTextLayoutManagerDelegate {
+    /// TEMP (OpenTrace): counts fragments actually built, so a layout probe can print
+    /// how many fragments an ensureLayout really produced. Layout cost is linear in
+    /// fragments, not characters.
+    static var madeCount = 0
+
     func textLayoutManager(
         _ textLayoutManager: NSTextLayoutManager,
         textLayoutFragmentFor location: any NSTextLocation,
         in textElement: NSTextElement
     ) -> NSTextLayoutFragment {
         PerfTrace.accumulate("fragProv") {
-            makeFragment(textLayoutManager: textLayoutManager, textElement: textElement)
+            Self.madeCount &+= 1
+            return makeFragment(textLayoutManager: textLayoutManager, textElement: textElement)
         }
     }
 

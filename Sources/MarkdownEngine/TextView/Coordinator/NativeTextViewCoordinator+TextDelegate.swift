@@ -311,6 +311,18 @@ extension NativeTextViewCoordinator {
         if isWritingToolsActive { return }
         PerfTrace.checkpoint("selIn")
         defer { PerfTrace.checkpoint("selOut") }
+        // Assigning `textView.string` during a document rebuild re-enters here
+        // synchronously (AppKit resets the selection), so a whole second styling pass
+        // can hide inside what looks like a plain string assignment. Sampling found
+        // seconds in here that the trace was attributing elsewhere.
+        OpenTrace.push("ENG-8b2 didChangeSelection")
+        defer { OpenTrace.pop("ENG-8b2 didChangeSelection") }
+        // During a document rebuild this fires re-entrantly (string assign + styled-string
+        // transfer both reset the selection). The rebuild produces the full styling and
+        // selection-derived state itself, so this whole pass is redundant — it replays the
+        // one surviving side effect (updateAutocorrectSettings + selection bookkeeping) at
+        // its end. Kept inside the ENG-8b2 span so the probe still records the ~0ms.
+        if isRebuildingDocument { return }
         let selRange = tv.selectedRange()
         let currentEventType = NSApp.currentEvent?.type
         // ONE bridge of the document text — this handler fires on every
@@ -502,8 +514,10 @@ extension NativeTextViewCoordinator {
                 previousActiveTokenIndices: previousActiveTokenIndices
             ))
             PerfTrace.measure("selRestyle") {
-                restyleTextView(tv, paragraphCandidates: paragraphCandidates, tokens: tokens,
-                                classified: parsed.classified, blocks: parsed.blocks)
+                OpenTrace.span("ENG-8b3 selRestyle", "paragraphs=\(paragraphCandidates.count)") {
+                    restyleTextView(tv, paragraphCandidates: paragraphCandidates, tokens: tokens,
+                                    classified: parsed.classified, blocks: parsed.blocks)
+                }
             }
         }
 

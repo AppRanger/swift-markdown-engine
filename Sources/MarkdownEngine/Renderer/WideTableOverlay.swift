@@ -212,6 +212,11 @@ extension NativeTextView {
 
     /// Walk storage; create / position / destroy overlays to match attrs.
     func performWideTableOverlayUpdate() {
+        // push/defer: this function has three early returns.
+        OpenTrace.push("ENG-12 wideTableOverlay")
+        var traceDocLen = 0
+        var traceWide = false
+        defer { OpenTrace.pop("ENG-12 wideTableOverlay", "docLen=\(traceDocLen) wide=\(traceWide)") }
         guard let storage = textStorage,
               let bridge = layoutBridge,
               let container = bridge.firstTextContainer,
@@ -220,6 +225,7 @@ extension NativeTextView {
             removeAllWideTableOverlays()
             return
         }
+        traceDocLen = storage.length
 
         let containerWidth = container.size.width
         guard containerWidth.isFinite, containerWidth > 0 else { return }
@@ -238,9 +244,12 @@ extension NativeTextView {
         // after each restyle), so stamp it when it gets slow.
         let presenceT0 = DispatchTime.now().uptimeNanoseconds
         var hasAnyWideTable = false
-        storage.enumerateAttribute(.scrollableBlockSourceID, in: fullRange, options: []) { value, _, stop in
-            if value is Int { hasAnyWideTable = true; stop.pointee = true }
+        OpenTrace.span("ENG-12a presenceScan", "docLen=\(storage.length) wide=\(hasAnyWideTable)") {
+            storage.enumerateAttribute(.scrollableBlockSourceID, in: fullRange, options: []) { value, _, stop in
+                if value is Int { hasAnyWideTable = true; stop.pointee = true }
+            }
         }
+        traceWide = hasAnyWideTable
         let presenceMs = Double(DispatchTime.now().uptimeNanoseconds - presenceT0) / 1_000_000
         if presenceMs > 0.3 {
             PerfTrace.stamp("wideTableOverlay.presenceScan", presenceMs, "wide=\(hasAnyWideTable ? 1 : 0) docLen=\(storage.length)")
@@ -252,7 +261,12 @@ extension NativeTextView {
 
         // Settle layout before measuring — stale fragments would yield wrong anchor Ys.
         let overlayT0 = DispatchTime.now().uptimeNanoseconds
-        tlm.ensureLayout(for: tlm.documentRange)
+        // frags = fragments this call actually built; 0 means the layout was already warm.
+        let fragsBefore = MarkdownLayoutManagerDelegate.madeCount
+        OpenTrace.span("ENG-12b ensureLayout(fullDoc)",
+                       "docLen=\(storage.length) frags=\(MarkdownLayoutManagerDelegate.madeCount - fragsBefore)") {
+            tlm.ensureLayout(for: tlm.documentRange)
+        }
         PerfTrace.stamp("wideTableOverlay.ensureLayout(fullDoc)",
                         Double(DispatchTime.now().uptimeNanoseconds - overlayT0) / 1_000_000,
                         "docLen=\(storage.length)")

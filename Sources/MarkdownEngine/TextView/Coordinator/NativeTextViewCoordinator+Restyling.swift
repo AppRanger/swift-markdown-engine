@@ -19,35 +19,64 @@ extension NativeTextViewCoordinator {
         from text: String,
         invalidateLayout: Bool = false
     ) {
+        OpenTrace.push("ENG-8 rebuildTextStorageAndStyle")
+        // Suppress the re-entrant textViewDidChangeSelection that `textView.string =`
+        // and the setAttributedString transfer below fire synchronously (71ms of
+        // redundant styling on a 346k note); the necessary side effect is replayed once
+        // at the end of this method.
+        isRebuildingDocument = true
+        defer { isRebuildingDocument = false }
         // Storage is raw Markdown; only wiki links transform on display.
         // In raw source mode display IS storage — no transform, no metadata.
         let services = configuration.services
         let rawMode = configuration.rawSourceMode
+        // Filled once the display string exists; the defer reads it at exit.
+        var tracedChars = 0
+        defer {
+            OpenTrace.pop("ENG-8 rebuildTextStorageAndStyle",
+                          "chars=\(tracedChars) invalidate=\(invalidateLayout) raw=\(rawMode)")
+        }
         let displayText: String
         if rawMode {
             displayText = text
             wikiLinkMetadata = [:]
         } else {
+            OpenTrace.push("ENG-8a makeDisplayState")
             let displayState = WikiLinkService.makeDisplayState(from: text) { services.wikiLinks.name(forID: $0) }
+            OpenTrace.pop("ENG-8a makeDisplayState", "links=\(displayState.metadata.count)")
             displayText = displayState.display
             wikiLinkMetadata = displayState.metadata
         }
 
-        if textView.string != displayText {
-            textView.string = displayText
-            parseGeneration &+= 1
+        // Claimed BEFORE the assignment: `textView.string =` re-enters
+        // textViewDidChangeSelection synchronously, whose updateCodeBlockSelection
+        // laid out the whole (still unstyled) document — 141ms / 7714 fragments that
+        // ENG-8k below rebuilds from scratch anyway. This rebuild's own
+        // ensureLayout IS that one-shot per-document layout.
+        didEnsureLayoutForCurrentDocument = true
+        OpenTrace.span("ENG-8b textView.string=") {
+            if textView.string != displayText {
+                textView.string = displayText
+                parseGeneration &+= 1
+            }
         }
         lastSyncedText = text
         lastComputedStorage = text
         previousDisplayLength = (displayText as NSString).length
         let nsDisplay = displayText as NSString
+        tracedChars = nsDisplay.length
+        // Annotated instead of passed as a detail: the length is only known once
+        // the NSString exists, and pop() evaluates details inside the timing.
+        OpenTrace.annotateLast("ENG-8b textView.string=", "chars=\(nsDisplay.length)")
         // Fresh document baseline: drop the incremental parse state and reseed
         // the backtick census (a stale count from the previous document would
         // force a spurious full-document restyle on the first keystroke).
-        parseState.invalidate()
-        pendingBacktickWindow = nil
-        backtickCensusNeedsRescan = false
-        previousBacktickCount = MarkdownDetection.tripleBacktickCount(in: nsDisplay)
+        OpenTrace.span("ENG-8c backtickCensus") {
+            parseState.invalidate()
+            pendingBacktickWindow = nil
+            backtickCensusNeedsRescan = false
+            previousBacktickCount = MarkdownDetection.tripleBacktickCount(in: nsDisplay)
+        }
         let fullRange = NSRange(location: 0, length: nsDisplay.length)
 
         let (baseFont, paragraph) = TextStylingService.makeBaseFontAndStyle(
@@ -61,25 +90,44 @@ extension NativeTextViewCoordinator {
             .foregroundColor: configuration.theme.bodyText,
             .paragraphStyle: paragraph
         ]
-        textView.textStorage?.beginEditing()
-        textView.textStorage?.removeAttribute(.link, range: fullRange)
-        textView.textStorage?.setAttributes(baseAttrs, range: fullRange)
+        // ── Root cause & fix (2026-07) ────────────────────────────────────────
+        // CPU+page-fault instrumentation proved the first per-process open of a large
+        // note spent 12.5s of PURE CPU (blocked=2ms), writing 69k attributes to the LIVE
+        // TextKit-2 storage and faulting in 315k pages / ~5GB; a later open with warm
+        // pages does the identical work in 78ms. So the whole styled string is built on a
+        // DETACHED NSMutableAttributedString and handed to the live storage in ONE
+        // transfer — the expensive first-touch happens off the layout-connected storage.
+        let built = NSMutableAttributedString(string: displayText)
+        built.setAttributes(baseAttrs, range: fullRange)
 
+        // Kept for the end-of-rebuild selection replay (see below); raw mode leaves it nil.
+        var parsedForReplay: ParsedDocument?
         if rawMode {
             // Base attributes only — the source stays verbatim and unstyled.
             activeTokenIndices = []
         } else {
+            // parsedDocumentVersion only advances on a FRESH parse, so an
+            // unchanged version means the internal memo answered.
+            let parseVersionBefore = parsedDocumentVersion
+            OpenTrace.push("ENG-8e parsedDocument")
             let parsed = parsedDocument(for: displayText)
+            parsedForReplay = parsed
+            OpenTrace.pop("ENG-8e parsedDocument",
+                          "tokens=\(parsed.tokens.count) blocks=\(parsed.blocks.count) "
+                          + "cacheHit=\(parsedDocumentVersion == parseVersionBefore ? 1 : 0)")
             let tokens = parsed.tokens
             // Hide caret from styling when read-only, else clicks reveal raw token syntax.
             let caretLocation = textView.isEditable ? textView.selectedRange().location : -1
+            OpenTrace.push("ENG-8f activeTokenIndices")
             activeTokenIndices = activeTokenIndices(
                 parsed: parsed,
                 selection: textView.selectedRange(),
                 in: nsDisplay,
                 suppressed: !textView.isEditable
             )
+            OpenTrace.pop("ENG-8f activeTokenIndices", "tokens=\(activeTokenIndices.count)")
 
+            OpenTrace.push("ENG-8g MarkdownStyler.styleAttributes")
             let ranges = MarkdownStyler.styleAttributes(
                 text: displayText,
                 fontName: fontName,
@@ -97,15 +145,51 @@ extension NativeTextViewCoordinator {
                 wikiLinkIDProvider: { [weak self] range in self?.wikiLinkID(for: range) },
                 precomputedTokens: tokens,
                 classified: parsed.classified,
+                // Same parse the tokens came from; without it the styler ran the
+                // block parser a SECOND time over the whole document per open.
+                precomputedBlocks: parsed.blocks,
                 configuration: configuration
             )
-            for (range, attrs) in ranges {
-                for (key, value) in attrs {
-                    textView.textStorage?.addAttribute(key, value: value, range: range)
-                }
+            // scoped=nil is the point: the rebuild passes no scopedRanges, so
+            // every token in the document is styled.
+            OpenTrace.pop("ENG-8g MarkdownStyler.styleAttributes", "ranges=\(ranges.count) scoped=nil")
+
+            // ROOT CAUSE (proven by a CPU sample of the 12.5–16s first-open hang):
+            // per-key `addAttribute` creates a short-lived intermediate dict on every
+            // call (the run's dict grows one key at a time), each interned into
+            // Foundation's global WEAK NSAttributeDictionary table. Each intermediate
+            // dies at the next add, leaving a weak tombstone, so the next insert triggers
+            // `-[NSConcreteHashTable rehashAround:]` to compact — O(table) per insert,
+            // quadratic overall, amplified by the app's large heap (expensive objc weak
+            // ops). Coalescing to non-overlapping runs and writing each with ONE
+            // `setAttributes` interns exactly one LIVE dict per run — no intermediates, no
+            // tombstones, no rehash thrash. First open dropped from 16s to tens of ms.
+            let cpuB = OpenTrace.threadCPUms(); let faultB = OpenTrace.faults()
+            OpenTrace.push("ENG-8h attrApply(detached)")
+            let runs = MarkdownStyler.flattenedRuns(ranges, base: baseAttrs,
+                                                    documentLength: fullRange.length)
+            for (range, attrs) in runs {
+                built.setAttributes(attrs, range: range)
             }
+            let fh = OpenTrace.faults()
+            OpenTrace.pop("ENG-8h attrApply(detached)",
+                          "ranges=\(ranges.count) runs=\(runs.count) "
+                          + "cpu=\(Int(OpenTrace.threadCPUms() - cpuB))ms faults=\(fh.minor - faultB.minor)")
         }
+
+        // ONE live-storage mutation carries the whole styled document across. This is the
+        // only edit that touches the layout-connected storage — measured separately so a
+        // slow transfer (interning re-paid on the live table) is visible.
+        let tCpu = OpenTrace.threadCPUms(); let tFault = OpenTrace.faults()
+        OpenTrace.push("ENG-8h2 transfer.setAttributedString")
+        textView.textStorage?.beginEditing()
+        textView.textStorage?.setAttributedString(built)
         textView.textStorage?.endEditing()
+        let tfh = OpenTrace.faults()
+        OpenTrace.pop("ENG-8h2 transfer.setAttributedString",
+                      "chars=\(fullRange.length) cpu=\(Int(OpenTrace.threadCPUms() - tCpu))ms "
+                      + "faults=\(tfh.minor - tFault.minor)")
+
 
         textView.typingAttributes = TextStylingService.makeBaseTypingAttributes(
             font: baseFont,
@@ -115,9 +199,38 @@ extension NativeTextViewCoordinator {
 
         if let tlm = textView.textLayoutManager {
             if invalidateLayout {
-                tlm.invalidateLayout(for: tlm.documentRange)
+                OpenTrace.span("ENG-8j invalidateLayout") {
+                    tlm.invalidateLayout(for: tlm.documentRange)
+                }
             }
+            // ensureLayout cost is linear in fragments built — snapshot the
+            // delegate's fragment counter across the call to report the count.
+            let fragmentsBefore = MarkdownLayoutManagerDelegate.madeCount
+            OpenTrace.push("ENG-8k ensureLayout(fullDoc)")
             tlm.ensureLayout(for: tlm.documentRange)
+            OpenTrace.pop("ENG-8k ensureLayout(fullDoc)",
+                          "frags=\(MarkdownLayoutManagerDelegate.madeCount - fragmentsBefore)")
+        }
+
+        // The re-entrant textViewDidChangeSelection was suppressed for this rebuild
+        // (isRebuildingDocument), so replay the one selection-derived side effect nothing
+        // else runs afterwards: spell/grammar/quote toggles for the loaded caret. Also seed
+        // the selection bookkeeping the next real selection change diffs against, so it
+        // starts from the loaded document instead of the previous one's stale caret. Raw
+        // mode / active Writing Tools skip both, exactly as the suppressed handler's own
+        // rawSourceMode / isWritingToolsActive early-returns would have.
+        if let parsed = parsedForReplay, !isWritingToolsActive {
+            let finalSelection = textView.selectedRange()
+            updateAutocorrectSettings(
+                textView,
+                caretLocation: finalSelection.location,
+                codeTokens: parsed.codeTokens,
+                latexTokens: parsed.latexTokens,
+                allTokens: parsed.tokens
+            )
+            previousActiveTokenIndices = activeTokenIndices
+            previousCaretLocation = finalSelection.location
+            previousSelectedRange = finalSelection
         }
 
         // Reconcile wide-table overlays after layout settles.

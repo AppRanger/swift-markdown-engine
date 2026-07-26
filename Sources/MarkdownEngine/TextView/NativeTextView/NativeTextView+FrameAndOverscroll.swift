@@ -100,7 +100,12 @@ extension NativeTextView {
 
         // Partial TextKit-2 layout under-measures and oscillates; force full layout only on switch/resize.
         if forceFullLayout {
-            textLayoutManager.ensureLayout(for: textLayoutManager.documentRange)
+            // frags = fragments this call actually built; 0 means the layout was already warm.
+            let fragsBefore = MarkdownLayoutManagerDelegate.madeCount
+            OpenTrace.span("ENG-9a measure.ensureLayout(fullDoc)",
+                           "chars=\((string as NSString).length) forced=\(forceFullLayout) frags=\(MarkdownLayoutManagerDelegate.madeCount - fragsBefore)") {
+                textLayoutManager.ensureLayout(for: textLayoutManager.documentRange)
+            }
         }
 
         let documentEnd = textLayoutManager.documentRange.endLocation
