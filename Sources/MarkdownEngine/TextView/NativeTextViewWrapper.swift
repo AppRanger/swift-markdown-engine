@@ -272,7 +272,11 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         textView.isAutomaticDashSubstitutionEnabled = false
         textView.onPasteImage = onPasteImage
         if #available(macOS 15.1, *) {
-            textView.writingToolsBehavior = .complete
+            // `.limited` = the Writing Tools popover panel; `.complete` = the inline
+            // experience that morphs the text with an animation. We use `.limited` so
+            // rewrites/proofread land in the popover (no in-text animation) — it also
+            // sidesteps the inline-rewrite flicker that dims text below the selection.
+            textView.writingToolsBehavior = .limited
         }
         // Create TextKit 2 layout bridge
         let bridge = LayoutBridge(textLayoutManager)
