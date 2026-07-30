@@ -32,6 +32,7 @@ extension NativeTextView {
         } else {
             super.mouseMoved(with: event)
             applyReadOnlyCursor(for: event)
+            applyInvertedIBeamIfNeeded(for: event)
         }
     }
 
@@ -45,6 +46,7 @@ extension NativeTextView {
         } else {
             super.mouseEntered(with: event)
             applyReadOnlyCursor(for: event)
+            applyInvertedIBeamIfNeeded(for: event)
         }
     }
 
@@ -107,25 +109,70 @@ extension NativeTextView {
     /// (view coordinates). `.link` is what drives `clickedOnLink`, so this
     /// matches exactly what is clickable.
     private func isOverLink(at viewPoint: CGPoint) -> Bool {
+        attributes(at: viewPoint)?[.link] != nil
+    }
+
+    /// Attributes of the character under `viewPoint`, or nil when the point is
+    /// past the end of a line / outside any fragment.
+    private func attributes(at viewPoint: CGPoint) -> [NSAttributedString.Key: Any]? {
         guard let tlm = textLayoutManager,
-              let textStorage = textStorage, textStorage.length > 0 else { return false }
+              let textStorage = textStorage, textStorage.length > 0 else { return nil }
 
         let containerPoint = CGPoint(x: viewPoint.x - textContainerOrigin.x,
                                      y: viewPoint.y - textContainerOrigin.y)
-        guard let fragment = tlm.textLayoutFragment(for: containerPoint) else { return false }
+        guard let fragment = tlm.textLayoutFragment(for: containerPoint) else { return nil }
 
         let fragFrame = fragment.layoutFragmentFrame
         let pInFrag = CGPoint(x: containerPoint.x - fragFrame.minX,
                               y: containerPoint.y - fragFrame.minY)
         // Only accept a line fragment that actually contains the point — guards
         // against clicks in trailing padding / past the end of a line.
-        guard let line = fragment.textLineFragments.first(where: { $0.typographicBounds.contains(pInFrag) }) else { return false }
+        guard let line = fragment.textLineFragments.first(where: { $0.typographicBounds.contains(pInFrag) }) else { return nil }
 
         let pInLine = CGPoint(x: pInFrag.x - line.typographicBounds.minX,
                               y: pInFrag.y - line.typographicBounds.minY)
         let idx = line.characterIndex(for: pInLine)
         let lineString = line.attributedString
-        guard idx >= 0, idx < lineString.length else { return false }
-        return lineString.attribute(.link, at: idx, effectiveRange: nil) != nil
+        guard idx >= 0, idx < lineString.length else { return nil }
+        return lineString.attributes(at: idx, effectiveRange: nil)
+    }
+
+    /// Ink + block of a span that repaints its foreground under `event`, or nil.
+    /// Same rule as the caret color: only a run that carries BOTH a background
+    /// and a foreground of its own is inverted — inline code and find matches
+    /// paint a background but keep the body ink, and the system I-beam is
+    /// already right on those.
+    func invertedRunColors(at event: NSEvent) -> (ink: NSColor, block: NSColor)? {
+        let attrs = attributes(at: convert(event.locationInWindow, from: nil))
+        guard let attrs,
+              let block = attrs[.backgroundColor] as? NSColor,
+              let ink = attrs[.foregroundColor] as? NSColor else { return nil }
+        // Resolve inside the view's appearance: these are dynamic colors, and
+        // `NSAppearance.current` during a mouse event is not necessarily ours —
+        // a dark editor would otherwise get the light-mode pair.
+        var resolved: (ink: NSColor, block: NSColor, body: NSColor)?
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            guard let ink = ink.usingColorSpace(.deviceRGB),
+                  let block = block.usingColorSpace(.deviceRGB),
+                  let body = configuration.theme.bodyText.usingColorSpace(.deviceRGB) else { return }
+            resolved = (ink, block, body)
+        }
+        guard let resolved else { return nil }
+        // Body ink on a background is inline code or a find match — the system
+        // I-beam is already right there; only a run that repaints its ink needs us.
+        guard resolved.ink != resolved.body else { return nil }
+        return (resolved.ink, resolved.block)
+    }
+
+    /// Over an inverted span the system I-beam is drawn in the block's own
+    /// color (macOS inverts it against the editor's backdrop, not against the
+    /// run under it), so it disappears. Swap in the same glyph recolored to the
+    /// span's own ink; anywhere else `super` keeps the system cursor.
+    func applyInvertedIBeamIfNeeded(for event: NSEvent) {
+        guard isEditable,
+              let colors = invertedRunColors(at: event),
+              let cursor = InvertedIBeamCursor.cursor(ink: colors.ink, block: colors.block)
+        else { return }
+        cursor.set()
     }
 }
