@@ -147,6 +147,11 @@ public final class NativeTextViewCoordinator: NSObject, NSTextViewDelegate {
     var previousSelectedRange: NSRange? = nil
     /// Drag-select suppressed a restyle; replayed on the next non-drag selection change.
     var needsRestyleAfterDrag = false
+    /// Caret color resolved at the last selection change (an extension span can
+    /// invert the ink under the caret). `updateNSView` re-applies it instead of
+    /// resetting to `theme.bodyText`, which would stomp it on any SwiftUI pass;
+    /// nil = no span, use the theme.
+    var resolvedCaretColor: NSColor?
 
     var cachedCodeBlockTokens: [(index: Int, token: MarkdownToken)] = []
     /// Dedupe key of the last emitted code-block selections — identical
