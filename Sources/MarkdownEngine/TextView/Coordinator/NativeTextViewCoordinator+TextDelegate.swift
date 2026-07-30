@@ -349,6 +349,14 @@ extension NativeTextViewCoordinator {
         let latexTokens = parsed.latexTokens
         let blockLatexTokens = parsed.blockLatexTokens
 
+        // The caret takes the ink of the span it sits in — an inverted highlight
+        // paints dark ink on a light block, where a bodyText caret is drawn in
+        // the block's own color and disappears. Cached for updateNSView, which
+        // has no tokens to hand.
+        let caretInk = caretColor(at: selRange.location, tokens: tokens)
+        resolvedCaretColor = caretInk
+        if tv.isEditable { tv.insertionPointColor = caretInk }
+
         let prevActive = activeTokenIndices
         PerfTrace.measure("selActive") {
             activeTokenIndices = activeTokenIndices(parsed: parsed, selection: selRange, in: nsText, suppressed: !tv.isEditable)

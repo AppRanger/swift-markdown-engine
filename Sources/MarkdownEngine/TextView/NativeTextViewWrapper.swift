@@ -519,7 +519,11 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         }
         textView.isEditable = isEditable
         textView.isSelectable = true
-        textView.insertionPointColor = isEditable ? context.coordinator.configuration.theme.bodyText : .clear
+        // Keep the caret ink the selection handler resolved (an extension span
+        // can invert it); a plain bodyText reset here stomps it on every pass.
+        textView.insertionPointColor = isEditable
+            ? (context.coordinator.resolvedCaretColor ?? context.coordinator.configuration.theme.bodyText)
+            : .clear
         let fontChanged = (context.coordinator.fontName != fontName) || (context.coordinator.fontSize != fontSize)
         if let pendingInlineReplacement {
             if pendingInlineReplacement.documentId == documentId,
