@@ -285,38 +285,52 @@ extension NativeTextViewCoordinator {
             currentActiveTokenIndices: activeTokenIndices,
             previousActiveTokenIndices: preEditActiveTokenIndices
         ))
-        // An ordered list numbers each item by its POSITION. A plain content edit
-        // never shifts numbers, so restyle only the containing list block (like
-        // tables). But adding/removing an item (a line-break edit) shifts every
-        // following number through the run end, so restyle the WHOLE forward run —
+        // An ordered list numbers each item by its POSITION, so adding or
+        // removing an item (a line-break or indent edit) shifts every following
+        // number through the end of the run: restyle the whole forward run —
         // list blocks joined by blank separators, stopping at the first content
-        // block. Numbers above are unchanged and the styler's backward seed feeds
-        // the count in, so forward-only from the edit is sufficient.
+        // block. Numbers ABOVE are unchanged and the styler's backward seed
+        // feeds the count in, so forward-only from the edit is enough. A plain
+        // content edit shifts no number and keeps the default paragraph scope.
         let listStructureChanged = pendingListStructureEdit
         pendingListStructureEdit = false
-        let editBlocks = parsed.blocks
-        var bi = 0
-        while bi < editBlocks.count {
-            let b = editBlocks[bi]
-            guard b.kind == .list,
-                  NSIntersectionRange(b.range, safeEditedRange).length > 0
-                    || NSIntersectionRange(b.range, paragraphRange).length > 0
-                    || NSIntersectionRange(b.range, previousParagraph).length > 0
-                    || NSIntersectionRange(b.range, nextParagraph).length > 0
-            else { bi += 1; continue }
-            if listStructureChanged {
-                var j = bi
+        if listStructureChanged {
+            let editBlocks = parsed.blocks
+            // The parser groups consecutive `-` lines into ONE block, so widening
+            // on `.kind == .list` alone made a bullet list pay for numbers it does
+            // not have. `firstMatch` returns on the first ordered line, so a
+            // numbered list answers at once; only a bullet block is scanned whole.
+            let hasOrderedItem: (NSRange) -> Bool = { range in
+                MarkdownStyler.orderedListRegex.firstMatch(in: docString, options: [], range: range) != nil
+            }
+            if let start = editBlocks.firstIndex(where: { b in
+                b.kind == .list
+                    && (NSIntersectionRange(b.range, safeEditedRange).length > 0
+                        || NSIntersectionRange(b.range, paragraphRange).length > 0
+                        || NSIntersectionRange(b.range, previousParagraph).length > 0
+                        || NSIntersectionRange(b.range, nextParagraph).length > 0)
+                    && hasOrderedItem(b.range)
+            }) {
+                var runEnd = NSMaxRange(editBlocks[start].range)
+                var j = start
                 walk: while j < editBlocks.count {
-                    switch editBlocks[j].kind {
-                    case .list:  effectiveParagraphCandidates.append(editBlocks[j].range); j += 1
+                    let next = editBlocks[j]
+                    switch next.kind {
+                    case .list:
+                        guard hasOrderedItem(next.range) else { break walk }   // a bullet block ends the run
+                        runEnd = NSMaxRange(next.range)
+                        j += 1
                     case .blank: j += 1
                     default:     break walk
                     }
                 }
-                bi = j
-            } else {
-                effectiveParagraphCandidates.append(b.range)
-                bi += 1
+                // ONE range for the whole run, not one per block: a loose list is
+                // one block PER ITEM and the styler matches every block against
+                // every scoped range, so n ranges made a single Return quadratic
+                // (944 ms at 800 items, Debug; 67 ms merged).
+                effectiveParagraphCandidates.append(
+                    NSRange(location: editBlocks[start].range.location,
+                            length: runEnd - editBlocks[start].range.location))
             }
         }
 

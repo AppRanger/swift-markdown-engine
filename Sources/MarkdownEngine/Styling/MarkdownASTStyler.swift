@@ -196,6 +196,10 @@ enum MarkdownASTStyler {
         pattern: #"^\s*((?:(\d+)[.)]|[-•*+])(?:\s+\[[ xX]\])?\s+)"#
     )
 
+    /// First non-blank character in a range answers "was there content in the
+    /// hole between two scoped blocks" without materializing the substring.
+    private static let nonWhitespace = CharacterSet.whitespacesAndNewlines.inverted
+
     /// Replays the ordered-list run that continues ABOVE `loc` (scanning backward
     /// in the full source: same-indent items counted, blank lines skipped, real
     /// content stops it) and returns the next number per indent. Lets a scoped
@@ -203,7 +207,11 @@ enum MarkdownASTStyler {
     private static func seedOrderedCounters(above loc: Int, in ns: NSString) -> [Int: Int] {
         guard loc > 0, loc <= ns.length else { return [:] }
         var runLines: [(indent: Int, number: Int?)] = []   // bottom-to-top; nil = bullet/other list
-        var scan = loc
+        // From the START of loc's line: callers pass a MARKER offset, which for
+        // an indented item still sits inside its own line — scanning up from
+        // there counted the item itself, so every nested list rendered one too
+        // high ("  1. a" showing 2.).
+        var scan = ns.lineRange(for: NSRange(location: min(loc, ns.length), length: 0)).location
         while scan > 0 {
             let lineRange = ns.lineRange(for: NSRange(location: scan - 1, length: 0))
             let line = ns.substring(with: lineRange) as NSString
@@ -248,7 +256,15 @@ enum MarkdownASTStyler {
         var needsSeed = true
         var contiguousEnd: Int?
         for block in blocks {
-            if let contiguousEnd, block.range.location > contiguousEnd {
+            if let contiguousEnd, block.range.location > contiguousEnd,
+               ns.rangeOfCharacter(from: Self.nonWhitespace, options: [],
+                                   range: NSRange(location: contiguousEnd,
+                                                  length: block.range.location - contiguousEnd)).location != NSNotFound {
+                // Only CONTENT in the hole ends the run. A hole of pure blank
+                // lines is loose-list spacing — and it is the shape the
+                // coordinator's forward walk hands us (list, list, list, blanks
+                // skipped), where re-seeding meant one full backward scan per
+                // item: 639 ms for a single Return in an 800-item loose list.
                 counters = [:]
                 needsSeed = true
             }

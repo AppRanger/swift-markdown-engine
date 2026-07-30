@@ -105,6 +105,33 @@ struct OrderedListDisplayNumberingTests {
         #expect(painted.first?.loc == tail.location)
     }
 
+    /// The seed scans BACKWARD from the item's marker — which for an indented
+    /// item still sits inside its own line, so it used to count that item and
+    /// every nested list rendered one too high with no gesture at all.
+    @Test("a nested ordered list starts at its own number")
+    func nestedListDoesNotCountItself() {
+        #expect(overlays(style("- outer\n  1. a\n  2. b")).isEmpty)
+        #expect(overlays(style("- outer\n\t1. a\n\t2. b")).isEmpty)
+        #expect(overlays(style("  1. alpha")).isEmpty)
+        #expect(overlays(style("1. top\n  1. nested\n  2. nested")).isEmpty)
+    }
+
+    /// A hole of blank lines between two scoped blocks is loose-list spacing,
+    /// so the count carries; a hole holding another item re-seeds from the
+    /// source and lands on the same number. Both must agree with a full pass.
+    @Test("a scope with holes counts through a loose list")
+    func scopeWithHolesCountsThroughLooseList() {
+        let text = "1. one\n\n1. two\n\n1. three\n"
+        let ns = text as NSString
+        let scoped = [ns.paragraphRange(for: NSRange(location: 0, length: 0)),
+                      ns.paragraphRange(for: ns.range(of: "1. three"))]
+
+        let painted = overlays(style(text, scoped: scoped))
+
+        #expect(painted.map(\.text) == ["3."])
+        #expect(overlays(style(text)).map(\.text) == ["2.", "3."])   // full pass agrees
+    }
+
     // MARK: Caret
 
     /// The caret parked at the line start is where every whole-line delete and
@@ -139,6 +166,20 @@ struct OrderedListDisplayNumberingTests {
 
         tv.setSelectedRange(NSRange(location: 2, length: 0))    // away, onto line 1
         #expect(overlays(in: tv).map(\.text) == ["2."])
+    }
+
+    /// A content keystroke shifts no number, so it keeps the default paragraph
+    /// scope instead of restyling the whole list block — the numbers below it
+    /// must survive that narrower pass untouched.
+    @Test("typing inside an item leaves the run's numbers alone")
+    func contentEditKeepsTheNumbers() {
+        let (_, tv) = makeEditor("1. a\n1. b\n1. c")
+        #expect(overlays(in: tv).map(\.text) == ["2.", "3."])
+
+        tv.insertText("x", replacementRange: NSRange(location: 9, length: 0))   // end of item 2's content
+
+        #expect(tv.string == "1. a\n1. bx\n1. c")
+        #expect(overlays(in: tv).map(\.text) == ["2.", "3."])
     }
 
     /// End-to-end repro of the shipped-looking bug: delete the middle item and
