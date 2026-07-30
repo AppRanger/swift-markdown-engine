@@ -24,6 +24,7 @@ extension NativeTextViewCoordinator {
     /// keystroke's O(edit) splice onto an O(doc) verify).
     func caretColor(at location: Int, tokens: [MarkdownToken]) -> NSColor {
         let theme = configuration.theme
+        guard configuration.cursorFollowsSpanInk else { return theme.bodyText }
         // Which extensions repaint their ink at all — for a registry where none
         // does (the engine's own highlight/strikethrough paint background and
         // decoration only) this is where the work stops, before the token scan.

@@ -143,6 +143,7 @@ extension NativeTextView {
     /// paint a background but keep the body ink, and the system I-beam is
     /// already right on those.
     func invertedRunColors(at event: NSEvent) -> (ink: NSColor, block: NSColor)? {
+        guard configuration.cursorFollowsSpanInk else { return nil }
         let attrs = attributes(at: convert(event.locationInWindow, from: nil))
         guard let attrs,
               let block = attrs[.backgroundColor] as? NSColor,

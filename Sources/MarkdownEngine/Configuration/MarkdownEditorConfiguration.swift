@@ -74,6 +74,16 @@ public struct MarkdownEditorConfiguration: Sendable {
     /// default: unregistered syntax stays literal text. Order defines match
     /// precedence among extensions; built-in constructs always win first.
     public var extensions: [any MarkdownExtension]
+    /// Let the caret and the I-beam take the ink of the extension span they sit
+    /// in, instead of `theme.bodyText` and the plain system pointer.
+    ///
+    /// Off by default. It only matters for an extension that INVERTS its
+    /// content (dark ink on a light block), where both cursors would otherwise
+    /// be drawn in the block's own color and disappear inside it. An extension
+    /// whose `contentAttributes` set no foreground is unaffected either way —
+    /// so this stays the embedder's explicit decision rather than something the
+    /// engine infers from a color it happens to see.
+    public var cursorFollowsSpanInk: Bool
 
     public init(
         theme: MarkdownEditorTheme = .default,
@@ -99,7 +109,8 @@ public struct MarkdownEditorConfiguration: Sendable {
         spellChecking: SpellCheckingPolicy = .default,
         heightBehavior: HeightBehavior = .scrolls,
         rawSourceMode: Bool = false,
-        extensions: [any MarkdownExtension] = []
+        extensions: [any MarkdownExtension] = [],
+        cursorFollowsSpanInk: Bool = false
     ) {
         self.theme = theme
         self.services = services
@@ -125,6 +136,7 @@ public struct MarkdownEditorConfiguration: Sendable {
         self.heightBehavior = heightBehavior
         self.rawSourceMode = rawSourceMode
         self.extensions = extensions
+        self.cursorFollowsSpanInk = cursorFollowsSpanInk
     }
 
     public static let `default` = MarkdownEditorConfiguration()

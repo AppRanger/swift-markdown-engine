@@ -28,13 +28,18 @@ private struct InvertingHighlight: MarkdownExtension {
 @Suite("Caret color follows the span's ink")
 struct CaretColorTests {
 
-    private func makeEditor(_ text: String, extensions: [any MarkdownExtension]) -> (NativeTextViewCoordinator, NativeTextView) {
+    private func makeEditor(
+        _ text: String,
+        extensions: [any MarkdownExtension],
+        followsInk: Bool = true
+    ) -> (NativeTextViewCoordinator, NativeTextView) {
         _ = NSApplication.shared
         let coordinator = NativeTextViewCoordinator(
             text: .constant(text), fontName: "SF Pro", fontSize: 16,
             isWikiLinkActive: .constant(false), onLinkClick: nil, onInlineSelectionChange: nil
         )
         coordinator.configuration.extensions = extensions
+        coordinator.configuration.cursorFollowsSpanInk = followsInk
         let tv = NativeTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
         tv.isEditable = true
         tv.delegate = coordinator
@@ -71,6 +76,18 @@ struct CaretColorTests {
 
         tv.setSelectedRange(NSRange(location: 19, length: 0))   // in `tail`
         #expect(tv.insertionPointColor == body)
+    }
+
+    /// The whole behavior is off unless the embedder asks for it — an inverting
+    /// extension alone must not change any other app's caret.
+    @Test("off by default, even with an inverting extension registered")
+    func doesNothingWithoutTheOptIn() {
+        let (coordinator, tv) = makeEditor(Self.text, extensions: [InvertingHighlight()], followsInk: false)
+
+        tv.setSelectedRange(NSRange(location: 11, length: 0))
+
+        #expect(tv.insertionPointColor == coordinator.configuration.theme.bodyText)
+        #expect(coordinator.resolvedCaretColor == coordinator.configuration.theme.bodyText)
     }
 
     /// The engine's own highlight paints a background only, so nothing changes
