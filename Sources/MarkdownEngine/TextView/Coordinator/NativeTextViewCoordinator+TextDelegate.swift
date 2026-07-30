@@ -397,18 +397,22 @@ extension NativeTextViewCoordinator {
         let latexTokens = parsed.latexTokens
         let blockLatexTokens = parsed.blockLatexTokens
 
-        // The caret takes the ink of the span it sits in — an inverted highlight
-        // paints dark ink on a light block, where a bodyText caret is drawn in
-        // the block's own color and disappears. Cached for updateNSView, which
-        // has no tokens to hand.
-        let caretInk = caretColor(at: selRange.location, tokens: tokens)
-        resolvedCaretColor = caretInk
-        if tv.isEditable { tv.insertionPointColor = caretInk }
-
         let prevActive = activeTokenIndices
         PerfTrace.measure("selActive") {
             activeTokenIndices = activeTokenIndices(parsed: parsed, selection: selRange, in: nsText, suppressed: !tv.isEditable)
             filterImageEmbedActiveTokens(parsed: parsed, text: nsText, selectionLocation: selRange.location)
+        }
+
+        // The caret takes the ink of the span it sits in — an inverted highlight
+        // paints dark ink on a light block, where a bodyText caret is drawn in
+        // the block's own color and disappears. Placed after the active-token
+        // pass so it can reuse it instead of walking the document's tokens
+        // again, and assigned only on a CHANGE (this fires on every keystroke).
+        // Cached for updateNSView, which has no tokens to hand.
+        let caretInk = caretColor(at: selRange.location, tokens: tokens, active: activeTokenIndices)
+        if caretInk != resolvedCaretColor {
+            resolvedCaretColor = caretInk
+            if tv.isEditable { tv.insertionPointColor = caretInk }
         }
 
         // Snap-back: when the caret LEFT a wiki/image token, re-sync its displayed name to the live target name.

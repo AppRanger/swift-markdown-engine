@@ -18,11 +18,15 @@ extension NativeTextViewCoordinator {
 
     /// Foreground an extension paints at `location`, or `theme.bodyText`.
     /// Only the CONTENT counts — on the `==` markers the background is the page
-    /// again, so the caret belongs back at the body color. Takes the tokens the
-    /// caller already parsed: this runs on every caret move and must not add a
-    /// parse (a `parsedDocument` call without the edit descriptor would drop the
-    /// keystroke's O(edit) splice onto an O(doc) verify).
-    func caretColor(at location: Int, tokens: [MarkdownToken]) -> NSColor {
+    /// again, so the caret belongs back at the body color.
+    ///
+    /// Runs on every keystroke, so it borrows both of the caller's results: the
+    /// already-parsed `tokens` (a `parsedDocument` call without the edit
+    /// descriptor would drop the keystroke's O(edit) splice onto an O(doc)
+    /// verify) and `active`, the memoized set of tokens the caret is inside —
+    /// which turns this from a pass over every token in the document into a
+    /// look at the two or three under the caret.
+    func caretColor(at location: Int, tokens: [MarkdownToken], active: Set<Int>) -> NSColor {
         let theme = configuration.theme
         guard configuration.cursorFollowsSpanInk else { return theme.bodyText }
         // Which extensions repaint their ink at all — for a registry where none
@@ -36,7 +40,9 @@ extension NativeTextViewCoordinator {
         }
         guard !inkByID.isEmpty else { return theme.bodyText }
         var innermost: (length: Int, color: NSColor)?
-        for token in tokens {
+        for index in active {
+            guard index >= 0, index < tokens.count else { continue }
+            let token = tokens[index]
             guard case .extensionSpan(let id) = token.kind, let color = inkByID[id],
                   location >= token.contentRange.location,
                   location <= NSMaxRange(token.contentRange)
