@@ -285,6 +285,40 @@ extension NativeTextViewCoordinator {
             currentActiveTokenIndices: activeTokenIndices,
             previousActiveTokenIndices: preEditActiveTokenIndices
         ))
+        // An ordered list numbers each item by its POSITION. A plain content edit
+        // never shifts numbers, so restyle only the containing list block (like
+        // tables). But adding/removing an item (a line-break edit) shifts every
+        // following number through the run end, so restyle the WHOLE forward run —
+        // list blocks joined by blank separators, stopping at the first content
+        // block. Numbers above are unchanged and the styler's backward seed feeds
+        // the count in, so forward-only from the edit is sufficient.
+        let listStructureChanged = pendingListStructureEdit
+        pendingListStructureEdit = false
+        let editBlocks = parsed.blocks
+        var bi = 0
+        while bi < editBlocks.count {
+            let b = editBlocks[bi]
+            guard b.kind == .list,
+                  NSIntersectionRange(b.range, safeEditedRange).length > 0
+                    || NSIntersectionRange(b.range, paragraphRange).length > 0
+                    || NSIntersectionRange(b.range, previousParagraph).length > 0
+                    || NSIntersectionRange(b.range, nextParagraph).length > 0
+            else { bi += 1; continue }
+            if listStructureChanged {
+                var j = bi
+                walk: while j < editBlocks.count {
+                    switch editBlocks[j].kind {
+                    case .list:  effectiveParagraphCandidates.append(editBlocks[j].range); j += 1
+                    case .blank: j += 1
+                    default:     break walk
+                    }
+                }
+                bi = j
+            } else {
+                effectiveParagraphCandidates.append(b.range)
+                bi += 1
+            }
+        }
 
         PerfTrace.measure("restyle") { restyleTextView(tv, paragraphCandidates: effectiveParagraphCandidates, tokens: tokens, classified: parsed.classified, blocks: parsed.blocks) }
         PerfTrace.measure("codeSel") { updateCodeBlockSelection(textView: tv, parsed: parsed) }
@@ -435,23 +469,38 @@ extension NativeTextViewCoordinator {
         let currentBulletSyntax = MarkdownStyler.bulletSyntaxRange(at: selLoc, in: docText)
         let bulletSyntaxChanged = prevBulletSyntax?.location != currentBulletSyntax?.location
             || prevBulletSyntax?.length != currentBulletSyntax?.length
+        // Ordered markers: the styler paints a POSITIONAL number over the source
+        // digits and reveals the raw digits while the caret edits them. Nothing
+        // else notices that crossing — markers aren't tokens and
+        // `bulletListRegex` carries no digits — so without this the line keeps
+        // whatever was painted last (raw `10.` stuck after editing a digit, or
+        // an overlay still asserting a number the run no longer has).
+        let prevOrderedSyntax = previousCaretLocation.flatMap {
+            MarkdownStyler.orderedSyntaxRange(at: $0, in: docText)
+        }
+        let currentOrderedSyntax = MarkdownStyler.orderedSyntaxRange(at: selLoc, in: docText)
+        let orderedSyntaxChanged = prevOrderedSyntax?.location != currentOrderedSyntax?.location
+            || prevOrderedSyntax?.length != currentOrderedSyntax?.length
         // Task syntax also reveals while a SELECTION sweeps it (styler is
         // selection-aware), but none of the caret-based signals above fire
         // when only the selection SPAN changes (shift-extend keeps the
         // anchor put). Cheap gate: only spans whose paragraphs contain a
         // task-marker prefix matter — plain selections never trigger.
-        let paragraphsTouchTaskSyntax: (NSRange?) -> Bool = { range in
+        let paragraphsTouchRevealSyntax: (NSRange?) -> Bool = { range in
             guard let range, range.length > 0 else { return false }
             let clamped = NSIntersectionRange(range, NSRange(location: 0, length: nsText.length))
             guard clamped.length > 0 else { return false }
             let span = nsText.paragraphRange(for: clamped)
             for needle in ["- [", "* [", "+ ["]
             where nsText.range(of: needle, options: [], range: span).location != NSNotFound { return true }
-            return false
+            // An ordered marker reveals its raw digits under a selection too, and
+            // its slot is kerned to the DISPLAY width — without a restyle the raw
+            // digits would draw into a slot sized for a different number.
+            return MarkdownStyler.orderedListRegex.firstMatch(in: docText, options: [], range: span) != nil
         }
         let selectionSpanChanged = previousSelectedRange != selRange
             && ((previousSelectedRange?.length ?? 0) > 0 || selRange.length > 0)
-            && (paragraphsTouchTaskSyntax(previousSelectedRange) || paragraphsTouchTaskSyntax(selRange))
+            && (paragraphsTouchRevealSyntax(previousSelectedRange) || paragraphsTouchRevealSyntax(selRange))
         // Mid-drag restyle is suppressed (revealing markers shifts the layout → drag hit-test lands short, dropping trailing chars) and replayed on release.
         let isDragSelecting = currentEventType == .leftMouseDragged || currentEventType == .periodic
         if shouldSkipSelectionRestyle {
@@ -459,7 +508,7 @@ extension NativeTextViewCoordinator {
         } else if isDragSelecting {
             needsRestyleAfterDrag = true
         } else if tokensChanged || taskSyntaxChanged || hrLineChanged || bulletSyntaxChanged
-                    || selectionSpanChanged || needsRestyleAfterDrag {
+                    || orderedSyntaxChanged || selectionSpanChanged || needsRestyleAfterDrag {
             needsRestyleAfterDrag = false
             // Candidates are built ONLY when a restyle actually runs — this
             // used to happen unconditionally on every selection change,
@@ -472,12 +521,12 @@ extension NativeTextViewCoordinator {
                 let safePrev = min(prevLoc, nsText.length)
                 paragraphCandidates.append(nsText.paragraphRange(for: NSRange(location: safePrev, length: 0)))
             }
-            // Selection-revealed task syntax lives anywhere in the selected
-            // span (old and new) — scope the restyle over both so extends
-            // reveal newly covered task lines and deselects re-hide the old
-            // ones. Gated on the task probe so plain selections never widen
-            // the scope beyond the caret paragraphs.
-            for span in [previousSelectedRange, selRange] where paragraphsTouchTaskSyntax(span) {
+            // Selection-revealed task/ordered syntax lives anywhere in the
+            // selected span (old and new) — scope the restyle over both so
+            // extends reveal newly covered lines and deselects re-hide the old
+            // ones. Gated on the probe so plain selections never widen the
+            // scope beyond the caret paragraphs.
+            for span in [previousSelectedRange, selRange] where paragraphsTouchRevealSyntax(span) {
                 guard let span else { continue }
                 let clamped = NSIntersectionRange(span, NSRange(location: 0, length: nsText.length))
                 if clamped.length > 0 { paragraphCandidates.append(nsText.paragraphRange(for: clamped)) }
@@ -695,9 +744,24 @@ extension NativeTextViewCoordinator {
             pendingBacktickWindow = (affectedCharRange.location, affectedCharRange.length,
                 MarkdownDetection.backtickWindowCount(in: preNS, around: affectedCharRange))
             pendingExtFenceTouched = editWindowTouchesExtensionFence(in: preNS, around: affectedCharRange)
+            // An ordered item is added/removed only when the edit inserts or
+            // deletes a line break → every following number shifts. A programmatic
+            // sub-edit (e.g. the list-continuation re-insert) only OR-adds, so it
+            // can't clear the user keystroke's signal.
+            let addsBreak = replacementString?.utf16.contains { $0 == 0x0A || $0 == 0x0D } ?? false
+            let removesBreak = affectedCharRange.length > 0
+                && preNS.rangeOfCharacter(from: .newlines, options: [], range: affectedCharRange).location != NSNotFound
+            // A tab insert/delete is an indent/outdent: it shifts a nested item's
+            // level and so the run's numbering, without touching a line break.
+            let addsTab = replacementString?.utf16.contains { $0 == 0x09 } ?? false
+            let removesTab = affectedCharRange.length > 0
+                && preNS.rangeOfCharacter(from: CharacterSet(charactersIn: "\t"), options: [], range: affectedCharRange).location != NSNotFound
+            let structural = addsBreak || removesBreak || addsTab || removesTab
+            pendingListStructureEdit = isProgrammaticEdit ? (pendingListStructureEdit || structural) : structural
         } else {
             pendingBacktickWindow = nil
             pendingExtFenceTouched = false
+            pendingListStructureEdit = true
         }
         if isProgrammaticEdit { return true }
         if isWritingToolsActive { return true }
