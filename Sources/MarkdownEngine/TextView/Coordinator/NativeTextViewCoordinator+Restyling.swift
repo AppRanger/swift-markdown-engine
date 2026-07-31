@@ -19,6 +19,12 @@ extension NativeTextViewCoordinator {
         from text: String,
         invalidateLayout: Bool = false
     ) {
+        // Suppress the re-entrant textViewDidChangeSelection that `textView.string =`
+        // and the setAttributedString transfer below fire synchronously (71ms of
+        // redundant styling on a 346k note); the necessary side effect is replayed once
+        // at the end of this method.
+        isRebuildingDocument = true
+        defer { isRebuildingDocument = false }
         // A rebuild means a different document (or a mode flip): drop the caret
         // ink resolved for the old one instead of carrying it into this text.
         resolvedCaretColor = nil
@@ -36,6 +42,12 @@ extension NativeTextViewCoordinator {
             wikiLinkMetadata = displayState.metadata
         }
 
+        // Claimed BEFORE the assignment: `textView.string =` re-enters
+        // textViewDidChangeSelection synchronously, whose updateCodeBlockSelection
+        // laid out the whole (still unstyled) document — 141ms / 7714 fragments that
+        // the ensureLayout below rebuilds from scratch anyway. This rebuild's own
+        // ensureLayout IS that one-shot per-document layout.
+        didEnsureLayoutForCurrentDocument = true
         if textView.string != displayText {
             textView.string = displayText
             parseGeneration &+= 1
@@ -64,15 +76,24 @@ extension NativeTextViewCoordinator {
             .foregroundColor: configuration.theme.bodyText,
             .paragraphStyle: paragraph
         ]
-        textView.textStorage?.beginEditing()
-        textView.textStorage?.removeAttribute(.link, range: fullRange)
-        textView.textStorage?.setAttributes(baseAttrs, range: fullRange)
+        // ── Root cause & fix (2026-07) ────────────────────────────────────────
+        // CPU+page-fault instrumentation proved the first per-process open of a large
+        // note spent 12.5s of PURE CPU (blocked=2ms), writing 69k attributes to the LIVE
+        // TextKit-2 storage and faulting in 315k pages / ~5GB; a later open with warm
+        // pages does the identical work in 78ms. So the whole styled string is built on a
+        // DETACHED NSMutableAttributedString and handed to the live storage in ONE
+        // transfer — the expensive first-touch happens off the layout-connected storage.
+        let built = NSMutableAttributedString(string: displayText)
+        built.setAttributes(baseAttrs, range: fullRange)
 
+        // Kept for the end-of-rebuild selection replay (see below); raw mode leaves it nil.
+        var parsedForReplay: ParsedDocument?
         if rawMode {
             // Base attributes only — the source stays verbatim and unstyled.
             activeTokenIndices = []
         } else {
             let parsed = parsedDocument(for: displayText)
+            parsedForReplay = parsed
             let tokens = parsed.tokens
             // Hide caret from styling when read-only, else clicks reveal raw token syntax.
             let caretLocation = textView.isEditable ? textView.selectedRange().location : -1
@@ -100,15 +121,37 @@ extension NativeTextViewCoordinator {
                 wikiLinkIDProvider: { [weak self] range in self?.wikiLinkID(for: range) },
                 precomputedTokens: tokens,
                 classified: parsed.classified,
+                // Same parse the tokens came from; without it the styler ran the
+                // block parser a SECOND time over the whole document per open.
+                precomputedBlocks: parsed.blocks,
                 configuration: configuration
             )
-            for (range, attrs) in ranges {
-                for (key, value) in attrs {
-                    textView.textStorage?.addAttribute(key, value: value, range: range)
-                }
+            // scoped=nil is the point: the rebuild passes no scopedRanges, so
+            // every token in the document is styled.
+
+            // ROOT CAUSE (proven by a CPU sample of the 12.5–16s first-open hang):
+            // per-key `addAttribute` creates a short-lived intermediate dict on every
+            // call (the run's dict grows one key at a time), each interned into
+            // Foundation's global WEAK NSAttributeDictionary table. Each intermediate
+            // dies at the next add, leaving a weak tombstone, so the next insert triggers
+            // `-[NSConcreteHashTable rehashAround:]` to compact — O(table) per insert,
+            // quadratic overall, amplified by the app's large heap (expensive objc weak
+            // ops). Coalescing to non-overlapping runs and writing each with ONE
+            // `setAttributes` interns exactly one LIVE dict per run — no intermediates, no
+            // tombstones, no rehash thrash. First open dropped from 16s to tens of ms.
+            let runs = MarkdownStyler.flattenedRuns(ranges, base: baseAttrs,
+                                                    documentLength: fullRange.length)
+            for (range, attrs) in runs {
+                built.setAttributes(attrs, range: range)
             }
         }
+
+        // ONE live-storage mutation carries the whole styled document across. This is the
+        // only edit that touches the layout-connected storage.
+        textView.textStorage?.beginEditing()
+        textView.textStorage?.setAttributedString(built)
         textView.textStorage?.endEditing()
+
 
         textView.typingAttributes = TextStylingService.makeBaseTypingAttributes(
             font: baseFont,
@@ -121,6 +164,27 @@ extension NativeTextViewCoordinator {
                 tlm.invalidateLayout(for: tlm.documentRange)
             }
             tlm.ensureLayout(for: tlm.documentRange)
+        }
+
+        // The re-entrant textViewDidChangeSelection was suppressed for this rebuild
+        // (isRebuildingDocument), so replay the one selection-derived side effect nothing
+        // else runs afterwards: spell/grammar/quote toggles for the loaded caret. Also seed
+        // the selection bookkeeping the next real selection change diffs against, so it
+        // starts from the loaded document instead of the previous one's stale caret. Raw
+        // mode / active Writing Tools skip both, exactly as the suppressed handler's own
+        // rawSourceMode / isWritingToolsActive early-returns would have.
+        if let parsed = parsedForReplay, !isWritingToolsActive {
+            let finalSelection = textView.selectedRange()
+            updateAutocorrectSettings(
+                textView,
+                caretLocation: finalSelection.location,
+                codeTokens: parsed.codeTokens,
+                latexTokens: parsed.latexTokens,
+                allTokens: parsed.tokens
+            )
+            previousActiveTokenIndices = activeTokenIndices
+            previousCaretLocation = finalSelection.location
+            previousSelectedRange = finalSelection
         }
 
         // Reconcile wide-table overlays after layout settles.

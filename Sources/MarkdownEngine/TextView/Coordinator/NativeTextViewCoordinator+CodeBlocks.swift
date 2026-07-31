@@ -56,6 +56,7 @@ extension NativeTextViewCoordinator {
         }
 
         // One-shot full-document layout per document; fixes stale Y from TextKit 2's lazy layout without per-update cost.
+        // Not on open: `rebuildTextStorageAndStyle` claims the flag up front, its own ensureLayout is this one.
         if !didEnsureLayoutForCurrentDocument, let tlm = textView.textLayoutManager {
             tlm.ensureLayout(for: tlm.documentRange)
             didEnsureLayoutForCurrentDocument = true
