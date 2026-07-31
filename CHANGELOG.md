@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-07-31
+
+### Added
+- **Ordered lists render their position.** An item's number is computed from its
+  place in the run and painted over the source digits, so typing, deleting,
+  merging and pasting renumber live. The `.md` file is never rewritten — the
+  source stays valid CommonMark whatever it says. The whole source marker is
+  hidden as one unit and the slot is kerned to the display width, so the dot
+  travels with the digits at any digit count; the raw digits are revealed while
+  they are edited.
+- `MarkdownEditorConfiguration.cursorFollowsSpanInk` (opt-in, off by default):
+  the caret and the I-beam take the ink of the extension span they sit in. It
+  matters for an extension that INVERTS its content — dark ink on a light block
+  — where both cursors are otherwise drawn in the block's own color and
+  disappear inside it. `InvertedIBeamCursor` recolors the live `NSCursor.iBeam`
+  image, which keeps the system shape and the user's pointer size.
+
+### Fixed
+- Find-in-document no longer erases other backgrounds. Clearing its highlights
+  removed `.backgroundColor` across the whole document, which blanked extension
+  spans, code fences and table cells until some unrelated restyle repainted
+  them. Find now marks its own backgrounds and restyles only the paragraphs it
+  touched.
+
+### Performance
+- **Large notes open ~14× faster.** Measured on a 346k-char / 5,241-block note
+  (Release): first open 19.5 s → 1.35 s, warm open 1.1 s → 590 ms, switching
+  away 440 ms → 115 ms. Styling is built on a detached string and transferred
+  with one `setAttributedString` — per-key `addAttribute` on live TextKit-2
+  storage left weak tombstones in Foundation's attribute-intern table, which
+  turned quadratic. The restyle apply uses a paragraph overlap index above 32
+  paragraphs, the redundant second full-document parse and the re-entrant
+  full-document layout during rebuild are gone, and the SwiftMath render cache
+  persists to disk (717 ms → 35 ms on relaunch, byte-identical geometry).
+- **Editing long ordered lists.** One Return in an 800-item loose list:
+  944 ms → 67 ms (was quadratic in list length). Typing in a 1,600-item ordered
+  list: 89 ms → 41 ms per key. Resolving the caret ink across 1,600 spans:
+  0.134 ms → 0.002 ms per keystroke.
+
+### Known limitations
+- A list item's continuation line is a paragraph and ends the run, so a
+  multi-line item switches numbering off below it.
+- A loose list keeps stale numbers after a pure digit edit (a digit edit is not
+  classified as structural).
+- Ordered task items (`1. [ ] x`) consume a number but render none.
+
 ## [0.10.1] - 2026-07-22
 
 ### Added
