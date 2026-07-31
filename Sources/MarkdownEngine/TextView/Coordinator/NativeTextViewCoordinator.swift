@@ -106,6 +106,10 @@ public final class NativeTextViewCoordinator: NSObject, NSTextViewDelegate {
     /// extension block fence — captured in shouldChangeTextIn so a DELETED
     /// fence still forces the full restyle in textDidChange.
     var pendingExtFenceTouched = false
+    /// Set in shouldChangeTextIn when an edit adds/removes a line break (an
+    /// ordered-list item was inserted/removed → every following number shifts);
+    /// consumed once in textDidChange to restyle the whole ordered run.
+    var pendingListStructureEdit = false
     /// Set when the storage mutated without the census bookkeeping seeing it
     /// (IME composition) — forces the next census back to a full scan.
     var backtickCensusNeedsRescan = false
@@ -149,6 +153,11 @@ public final class NativeTextViewCoordinator: NSObject, NSTextViewDelegate {
     var previousSelectedRange: NSRange? = nil
     /// Drag-select suppressed a restyle; replayed on the next non-drag selection change.
     var needsRestyleAfterDrag = false
+    /// Caret color resolved at the last selection change (an extension span can
+    /// invert the ink under the caret). `updateNSView` re-applies it instead of
+    /// resetting to `theme.bodyText`, which would stomp it on any SwiftUI pass;
+    /// nil = no span, use the theme.
+    var resolvedCaretColor: NSColor?
 
     var cachedCodeBlockTokens: [(index: Int, token: MarkdownToken)] = []
     /// Dedupe key of the last emitted code-block selections — identical

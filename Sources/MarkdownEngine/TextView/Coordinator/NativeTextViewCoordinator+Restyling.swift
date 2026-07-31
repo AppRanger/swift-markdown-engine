@@ -25,6 +25,9 @@ extension NativeTextViewCoordinator {
         // at the end of this method.
         isRebuildingDocument = true
         defer { isRebuildingDocument = false }
+        // A rebuild means a different document (or a mode flip): drop the caret
+        // ink resolved for the old one instead of carrying it into this text.
+        resolvedCaretColor = nil
         // Storage is raw Markdown; only wiki links transform on display.
         // In raw source mode display IS storage — no transform, no metadata.
         let services = configuration.services

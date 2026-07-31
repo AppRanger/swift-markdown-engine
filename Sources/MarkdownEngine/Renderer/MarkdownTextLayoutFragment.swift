@@ -24,6 +24,7 @@ extension NSAttributedString.Key {
     /// Marks a bullet-list marker char (`-`/`*`/`+`) whose glyph is hidden so
     /// the fragment can paint a `•` in its place. Set to `true`.
     static let bulletMarker = NSAttributedString.Key("BulletListMarker")
+    static let orderedMarker = NSAttributedString.Key("OrderedListMarker")
     /// CGFloat — natural image width; presence flags block as overlay-rendered.
     static let scrollableBlockNaturalWidth = NSAttributedString.Key("ScrollableBlockNaturalWidth")
     /// Int — hash of source text; key for overlay reconcile + offset persistence.
@@ -89,6 +90,7 @@ final class MarkdownTextLayoutFragment: NSTextLayoutFragment {
 
         // 4b. Bullet glyphs (on top of hidden -/*/+ markers)
         drawBulletMarkers(at: point, in: context)
+        drawOrderedMarkers(at: point, in: context)
 
         // 5. Thematic breaks (full-width line, painted last so it doesn't
         //    fight with anything that already drew at the line's center)
@@ -554,6 +556,42 @@ final class MarkdownTextLayoutFragment: NSTextLayoutFragment {
             // ascent below — so top = baseline − ascent aligns the glyph.
             let topY = pos.baselineY - font.ascender
             glyph.draw(at: CGPoint(x: pos.x + xOffset, y: topY), withAttributes: glyphAttrs)
+        }
+    }
+
+    // MARK: - Ordered List Markers
+
+    /// Paint the whole display marker "N." (`.orderedMarker` value) over the
+    /// hidden source marker (digits + dot, cleared by the styler as one unit and
+    /// kerned to the display width so any digit count aligns and content/wrapped
+    /// lines hang at that width). Draws the raw source marker instead while the
+    /// line is selected, so selection reveals the literal digits.
+    private func drawOrderedMarkers(at point: CGPoint, in context: CGContext) {
+        guard let ts = textStorage, let range = fragmentNSRange, range.length > 0 else { return }
+        let selectionRanges: [NSRange] = {
+            guard let tv = textLayoutManager?.textContainer?.textView else { return [] }
+            return tv.selectedRanges.map { $0.rangeValue }.filter { $0.length > 0 }
+        }()
+
+        NSGraphicsContext.saveGraphicsState()
+        defer { NSGraphicsContext.restoreGraphicsState() }
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: true)
+
+        let theme = (textLayoutManager?.textContainer?.textView as? NativeTextView)?
+            .configuration.theme ?? .default
+        let storageString = ts.string as NSString
+
+        ts.enumerateAttribute(.orderedMarker, in: range, options: []) { [weak self] value, attrRange, _ in
+            guard let self, let number = value as? String else { return }
+            guard let pos = self.drawPosition(forDocumentCharAt: attrRange.location, point: point) else { return }
+            let font = (ts.attribute(.font, at: attrRange.location, effectiveRange: nil) as? NSFont)
+                ?? (self.textLayoutManager?.textContainer?.textView?.font ?? NSFont.systemFont(ofSize: NSFont.systemFontSize))
+            let isSelected = selectionRanges.contains(where: { NSIntersectionRange($0, attrRange).length > 0 })
+            let raw = storageString.substring(with: attrRange)
+            let glyph = (isSelected ? raw : number) as NSString
+            let glyphAttrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: theme.bodyText]
+            let topY = pos.baselineY - font.ascender
+            glyph.draw(at: CGPoint(x: pos.x, y: topY), withAttributes: glyphAttrs)
         }
     }
 

@@ -13,6 +13,13 @@
 
 import AppKit
 
+extension NSAttributedString.Key {
+    /// Marks a background this file painted. `.backgroundColor` has other owners
+    /// (extension spans, code fences, table cells), so find has to recognize its
+    /// own highlights before removing any.
+    static let findHighlight = NSAttributedString.Key("FindHighlight")
+}
+
 extension NativeTextViewCoordinator {
     /// Legacy path: the host computes match ranges and posts them. Kept for compatibility, but
     /// it trusts SOURCE-coordinate ranges, which misalign wherever the displayed text is shorter
@@ -128,14 +135,42 @@ extension NativeTextViewCoordinator {
         postFindResults(count: remaining.count)
     }
 
+    /// Drop find's own backgrounds and restyle the paragraphs they sat in.
+    ///
+    /// Removing `.backgroundColor` takes the styling background with it - one
+    /// attribute, several owners - and nothing repaints it on its own, so an
+    /// `==` block stayed blank until the next restyle happened to run (a click).
+    /// Scoped to the marked ranges: paragraphs find never touched keep theirs.
+    private func clearFindHighlights(in textView: NSTextView) {
+        guard let storage = textView.textStorage else { return }
+        let text = textView.string as NSString
+        guard text.length > 0 else { return }
+
+        var highlighted: [NSRange] = []
+        storage.enumerateAttribute(
+            .findHighlight,
+            in: NSRange(location: 0, length: text.length),
+            options: []
+        ) { value, range, _ in
+            if value != nil { highlighted.append(range) }
+        }
+        guard !highlighted.isEmpty else { return }
+
+        for range in highlighted {
+            storage.removeAttribute(.backgroundColor, range: range)
+            storage.removeAttribute(.findHighlight, range: range)
+        }
+        // Raw source mode has no styling to restore; restyleParagraphs no-ops there.
+        restyleParagraphs(highlighted.map { text.paragraphRange(for: $0) }, in: textView)
+    }
+
     /// Highlight all matches (current one stronger) and scroll the current match into view.
     private func renderFindMatches(_ allRanges: [NSRange], currentIndex: Int) {
         guard let tv = textView else { return }
         let storage = tv.textStorage
         let fullRange = NSRange(location: 0, length: (tv.string as NSString).length)
 
-        // Clear previous highlights
-        storage?.removeAttribute(.backgroundColor, range: fullRange)
+        clearFindHighlights(in: tv)
 
         // Highlight all matches; the focused match gets a stronger color.
         let theme = configuration.theme
@@ -147,6 +182,7 @@ extension NativeTextViewCoordinator {
             guard matchRange.location + matchRange.length <= fullRange.length else { continue }
             let color = (i == currentIndex) ? currentHighlightColor : highlightColor
             storage?.addAttribute(.backgroundColor, value: color, range: matchRange)
+            storage?.addAttribute(.findHighlight, value: true, range: matchRange)
         }
 
         if let tlm = tv.textLayoutManager {
@@ -211,8 +247,7 @@ extension NativeTextViewCoordinator {
             }
         }
 
-        let fullRange = NSRange(location: 0, length: (tv.string as NSString).length)
-        tv.textStorage?.removeAttribute(.backgroundColor, range: fullRange)
+        clearFindHighlights(in: tv)
         if let tlm = tv.textLayoutManager {
             tlm.ensureLayout(for: tlm.documentRange)
         }

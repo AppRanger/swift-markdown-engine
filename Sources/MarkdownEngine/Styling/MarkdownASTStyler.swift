@@ -51,6 +51,10 @@ enum MarkdownASTStyler {
         codePara.tailIndent = -configuration.codeBlock.horizontalIndent
         codePara.minimumLineHeight = codeLineHeight
         codePara.maximumLineHeight = codeLineHeight
+        // precomputed=0 ⇒ the document is parsed a SECOND time here (the rebuild already parsed it).
+        // Ahead of `ctx` because the ordered-list display numbers are derived from these blocks.
+        let blocks = DocumentAST.parse(text, scopedRanges: scopedRanges, precomputedBlocks: precomputedBlocks,
+                                       registry: configuration.extensionRegistry)
         let ctx = Ctx(
             ns: ns,
             fontName: fontName,
@@ -66,11 +70,9 @@ enum MarkdownASTStyler {
             config: configuration,
             extensionsByID: configuration.extensionsByID,
             wikiLinkID: wikiLinkIDProvider,
-            scopedRanges: scopedRanges
+            scopedRanges: scopedRanges,
+            orderedDisplayNumbers: computeOrderedDisplayNumbers(blocks: blocks, ns: ns)
         )
-        let blocks = DocumentAST.parse(text, scopedRanges: scopedRanges, precomputedBlocks: precomputedBlocks,
-                                       registry: configuration.extensionRegistry)
-        // precomputed=0 ⇒ the document is parsed a SECOND time here (the rebuild already parsed it).
         var attrs: [StyledRange] = []
         for block in blocks where ctx.inScope(block.range) {
             styleBlock(block, font: baseFont, ctx: ctx, into: &attrs)
@@ -192,8 +194,120 @@ enum MarkdownASTStyler {
         attrs.append((hr, [.paragraphStyle: NSMutableParagraphStyle()]))
     }
 
+    /// Ordered-list display numbers computed across the WHOLE document, keyed by
+    /// each ordered item's marker location. Positional, not the literal digit, so
+    /// any edit renumbers correctly; the count carries across a blank line (a
+    /// loose-list separator) so `1.`/`2.`⏎blank⏎`2.` shows 1,2,3 — real content
+    /// between lists resets it. First item of a run keeps its own start value.
+    /// Like MarkdownLists.listRegex but also accepts `)` ordered markers (`5)`),
+    /// matching the AST — used by the backward seed scan (group 2 = digits).
+    private static let seedOrderedLineRegex = try! NSRegularExpression(
+        pattern: #"^\s*((?:(\d+)[.)]|[-•*+])(?:\s+\[[ xX]\])?\s+)"#
+    )
+
+    /// First non-blank character in a range answers "was there content in the
+    /// hole between two scoped blocks" without materializing the substring.
+    private static let nonWhitespace = CharacterSet.whitespacesAndNewlines.inverted
+
+    /// Replays the ordered-list run that continues ABOVE `loc` (scanning backward
+    /// in the full source: same-indent items counted, blank lines skipped, real
+    /// content stops it) and returns the next number per indent. Lets a scoped
+    /// restyle that only sees a local window continue the document's numbering.
+    private static func seedOrderedCounters(above loc: Int, in ns: NSString) -> [Int: Int] {
+        guard loc > 0, loc <= ns.length else { return [:] }
+        var runLines: [(indent: Int, number: Int?)] = []   // bottom-to-top; nil = bullet/other list
+        // From the START of loc's line: callers pass a MARKER offset, which for
+        // an indented item still sits inside its own line — scanning up from
+        // there counted the item itself, so every nested list rendered one too
+        // high ("  1. a" showing 2.).
+        var scan = ns.lineRange(for: NSRange(location: min(loc, ns.length), length: 0)).location
+        while scan > 0 {
+            let lineRange = ns.lineRange(for: NSRange(location: scan - 1, length: 0))
+            let line = ns.substring(with: lineRange) as NSString
+            let full = NSRange(location: 0, length: line.length)
+            if (line as String).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                scan = lineRange.location                    // blank line: loose-list spacing
+                continue
+            }
+            guard let m = seedOrderedLineRegex.firstMatch(in: line as String, range: full) else { break }
+            let ws = MarkdownLists.leadingWhitespaceRegex.firstMatch(in: line as String, range: full)
+                .map { line.substring(with: $0.range) } ?? ""
+            let number = m.range(at: 2).location != NSNotFound ? Int(line.substring(with: m.range(at: 2))) : nil
+            // Key by the raw leading-whitespace char count to match the parser's
+            // `item.indent` used by computeOrderedDisplayNumbers — otherwise a
+            // nested item's seed counter wouldn't line up and it'd fall back to
+            // the literal digit.
+            runLines.append(((ws as NSString).length, number))
+            scan = lineRange.location
+        }
+        var counters: [Int: Int] = [:]
+        for item in runLines.reversed() {                    // replay top-to-bottom
+            if let number = item.number {
+                counters[item.indent] = (counters[item.indent] ?? number) + 1
+            } else {
+                counters[item.indent] = nil
+            }
+            for key in counters.keys where key > item.indent { counters[key] = nil }
+        }
+        return counters
+    }
+
+    private static func computeOrderedDisplayNumbers(blocks: [BlockNode], ns: NSString) -> [Int: Int] {
+        var result: [Int: Int] = [:]
+        var counters: [Int: Int] = [:]
+        // `blocks` is NOT the document: a scoped restyle keeps only the blocks that
+        // intersect the scope, and a multi-region scope (caret paragraph + previous
+        // caret paragraph, built on every click) drops everything between them —
+        // including the prose whose `default:` below is what ends a run. So treat
+        // every discontinuity like a fresh start and re-seed from the SOURCE, the
+        // only thing that can still see the skipped text. Lazily, at the first
+        // ordered item after the gap, so prose/bullet restyles never pay the scan.
+        var needsSeed = true
+        var contiguousEnd: Int?
+        for block in blocks {
+            if let contiguousEnd, block.range.location > contiguousEnd,
+               ns.rangeOfCharacter(from: Self.nonWhitespace, options: [],
+                                   range: NSRange(location: contiguousEnd,
+                                                  length: block.range.location - contiguousEnd)).location != NSNotFound {
+                // Only CONTENT in the hole ends the run. A hole of pure blank
+                // lines is loose-list spacing — and it is the shape the
+                // coordinator's forward walk hands us (list, list, list, blanks
+                // skipped), where re-seeding meant one full backward scan per
+                // item: 639 ms for a single Return in an 800-item loose list.
+                counters = [:]
+                needsSeed = true
+            }
+            contiguousEnd = NSMaxRange(block.range)
+            switch block {
+            case .list(_, let items):
+                for item in items {
+                    if item.ordered, let literal = item.number {
+                        if needsSeed {
+                            counters = seedOrderedCounters(above: item.marker.location, in: ns)
+                            needsSeed = false
+                        }
+                        let n = counters[item.indent] ?? literal
+                        result[item.marker.location] = n
+                        counters[item.indent] = n + 1
+                    } else {
+                        counters[item.indent] = nil
+                    }
+                    for key in counters.keys where key > item.indent { counters[key] = nil }
+                }
+            case .blank:
+                break                     // blank lines keep the count (spacing, not a reset)
+            case .paragraph(_, let inlines) where inlines.isEmpty:
+                break                     // an empty paragraph line is spacing too
+            default:
+                counters = [:]            // real text/content ends the run
+                needsSeed = false         // a seed scan would stop on this line anyway
+            }
+        }
+        return result
+    }
+
     /// AST list-item decoration: indent paragraph, `•` bullet, checkbox + strikethrough, all caret-aware.
-    private static func styleListItem(_ item: ListItem, ctx: Ctx, into attrs: inout [StyledRange]) {
+    private static func styleListItem(_ item: ListItem, displayNumber: Int?, ctx: Ctx, into attrs: inout [StyledRange]) {
         guard ctx.config.lists.helpersEnabled else { return }
 
         // Line content (item line minus its trailing newline).
@@ -228,8 +342,32 @@ enum MarkdownASTStyler {
             markerGroup = NSRange(location: item.marker.location,
                                   length: item.contentRange.location - item.marker.location)
         }
+        // An ordered item whose displayed number differs from its source digit
+        // gets its WHOLE marker overlaid (below); the hanging indent must then
+        // measure the DISPLAY marker so wrapped lines align at any digit count.
+        // False while the caret reveals the marker (edit at raw width) and for
+        // tasks (the checkbox branch owns those).
+        let orderedSyntax = NSRange(location: item.marker.location,
+                                    length: item.contentRange.location - item.marker.location)
+        // Also off while the marker is inside a selection: the painter reveals the
+        // raw source digits there, so the slot must revert to raw width (else a
+        // kerned slot leaves a gap/overlap over the raw digits).
+        let orderedOverlayActive = item.ordered && item.checkbox == nil && item.number != nil
+            && displayNumber != nil && displayNumber != item.number
+            && !MarkdownStyler.caretRevealsOrderedMarker(caret: ctx.caret, syntax: orderedSyntax)
+            && !ctx.selectionIntersects(orderedSyntax)
+        // Keep the source punctuation (`.` or `)`) when overlaying, so a paren list stays a paren list.
+        let orderedPunct = orderedOverlayActive && item.marker.length > 0
+            ? ctx.ns.substring(with: NSRange(location: NSMaxRange(item.marker) - 1, length: 1)) : "."
         // Via the memoized measure — list markers are a tiny repeated set (`- `, `1. `).
-        let markerWidth = HeadingHelpers.textWidth(ctx.ns.substring(with: markerGroup), font: ctx.baseFont)
+        let markerWidth: CGFloat = {
+            if orderedOverlayActive, let displayNumber {
+                let gap = ctx.ns.substring(with: NSRange(location: NSMaxRange(item.marker),
+                                                         length: item.contentRange.location - NSMaxRange(item.marker)))
+                return HeadingHelpers.textWidth("\(displayNumber)\(orderedPunct)" + gap, font: ctx.baseFont)
+            }
+            return HeadingHelpers.textWidth(ctx.ns.substring(with: markerGroup), font: ctx.baseFont)
+        }()
         let depthIndent = CGFloat(MarkdownLists.indentLevel(from: ws)) * ctx.config.lists.indentPerLevel
         let ps = NSMutableParagraphStyle()
         let lineHeight = ctx.baseLineHeight + ctx.config.lists.extraLineHeight
@@ -276,6 +414,25 @@ enum MarkdownASTStyler {
                                  length: item.contentRange.location - item.marker.location)
             if NSLocationInRange(ctx.caret, syntax) { return }
             attrs.append((item.marker, [.bulletMarker: true, .foregroundColor: NSColor.clear]))
+        } else if orderedOverlayActive, let displayNumber {
+            // Hide the ENTIRE source marker (digits + dot) as one unit and paint
+            // the whole display marker "N." over it, so the dot travels with the
+            // digits. Kern the slot to the display marker's width (horizontal
+            // only — a scaled font would inflate the marker ascent and push the
+            // content baseline down under the pinned line height); spread across
+            // all marker chars so every glyph advance stays positive even when
+            // the number shrinks (10 → 9).
+            let sourceW = (ctx.ns.substring(with: item.marker) as NSString)
+                .size(withAttributes: [.font: ctx.baseFont]).width
+            let displayW = ("\(displayNumber)\(orderedPunct)" as NSString)
+                .size(withAttributes: [.font: ctx.baseFont]).width
+            var markerAttrs: [NSAttributedString.Key: Any] = [
+                .orderedMarker: "\(displayNumber)\(orderedPunct)", .foregroundColor: NSColor.clear,
+            ]
+            if abs(displayW - sourceW) > 0.01 {
+                markerAttrs[.kern] = (displayW - sourceW) / CGFloat(max(1, item.marker.length))
+            }
+            attrs.append((item.marker, markerAttrs))
         }
     }
 
@@ -354,6 +511,7 @@ enum MarkdownASTStyler {
         let extensionsByID: [String: any MarkdownExtension]
         let wikiLinkID: (NSRange) -> String?
         let scopedRanges: [NSRange]?
+        let orderedDisplayNumbers: [Int: Int]
 
         /// True when a non-empty selection overlaps `range` — the selection
         /// counterpart of `isActive` for elements that reveal on select.
@@ -412,7 +570,8 @@ enum MarkdownASTStyler {
 
         case .list(_, let items):
             for item in items {
-                styleListItem(item, ctx: ctx, into: &attrs)
+                styleListItem(item, displayNumber: ctx.orderedDisplayNumbers[item.marker.location],
+                              ctx: ctx, into: &attrs)
                 styleInlines(item.inlines, font: font, ctx: ctx, into: &attrs)
             }
 
