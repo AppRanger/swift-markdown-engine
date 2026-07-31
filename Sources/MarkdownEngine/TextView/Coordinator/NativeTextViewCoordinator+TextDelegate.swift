@@ -311,6 +311,15 @@ extension NativeTextViewCoordinator {
         if isWritingToolsActive { return }
         PerfTrace.checkpoint("selIn")
         defer { PerfTrace.checkpoint("selOut") }
+        // Assigning `textView.string` during a document rebuild re-enters here
+        // synchronously (AppKit resets the selection), so a whole second styling pass
+        // can hide inside what looks like a plain string assignment.
+        // During a document rebuild this fires re-entrantly (string assign + styled-string
+        // transfer both reset the selection). The rebuild produces the full styling and
+        // selection-derived state itself, so this whole pass is redundant — it replays the
+        // one surviving side effect (updateAutocorrectSettings + selection bookkeeping) at
+        // its end.
+        if isRebuildingDocument { return }
         let selRange = tv.selectedRange()
         let currentEventType = NSApp.currentEvent?.type
         // ONE bridge of the document text — this handler fires on every

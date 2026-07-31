@@ -75,6 +75,19 @@ extension MarkdownStyler {
         let blockquoteRanges = MarkdownStyler.StylingContext.indexed(ctx.tokens, .blockquote).map { $0.token.range }
         // Built once, not re-scanned per formula (latexFontSize was O(#latex × #tokens)).
         let headings = ctx.scoped(MarkdownStyler.StylingContext.indexed(ctx.tokens, .heading)).map { $0.token }
+        // Each textWidth is a CoreText measurement; the two "$" marker widths are
+        // loop-invariant (fonts constant) and firstChar/restText repeat massively (2
+        // distinct formulas × 1,594 tokens). Hoisting + memoizing removes all per-formula
+        // width measurement — ENG-8g2b self ~186ms→~152ms on the 346k note (Debug).
+        let tinyDollarWidth = HeadingHelpers.textWidth("$", font: ctx.latexMarkerFont)
+        let baseDollarWidth = HeadingHelpers.textWidth("$", font: ctx.baseFont)
+        var markerFontWidthCache: [String: CGFloat] = [:]  // all measured with latexMarkerFont
+        func markerFontWidth(_ s: String) -> CGFloat {
+            if let cached = markerFontWidthCache[s] { return cached }
+            let w = HeadingHelpers.textWidth(s, font: ctx.latexMarkerFont)
+            markerFontWidthCache[s] = w
+            return w
+        }
         for (idx, token) in scopedLatex {
             if MarkdownDetection.isInsideCodeBlock(range: token.range, codeTokens: ctx.codeTokens) { continue }
             if tableRanges.contains(where: { tableRange in
@@ -101,8 +114,6 @@ extension MarkdownStyler {
                 if let entry = ctx.services.latex.render(latex: latexContent, fontSize: latexFontSize, theme: renderTheme) {
                     let imageBounds = CGRect(x: 0, y: entry.baselineOffset, width: entry.size.width, height: entry.size.height)
                     let contentLength = token.contentRange.length
-                    let tinyDollarWidth = HeadingHelpers.textWidth("$", font: ctx.latexMarkerFont)
-                    let baseDollarWidth = HeadingHelpers.textWidth("$", font: ctx.baseFont)
 
                     if contentLength > 0 {
                         let firstCharRange = NSRange(location: token.contentRange.location, length: 1)
@@ -112,7 +123,7 @@ extension MarkdownStyler {
                             .latexBounds: NSValue(rect: imageBounds),
                             .foregroundColor: NSColor.clear,
                             .font: ctx.latexMarkerFont,
-                            .kern: entry.size.width - HeadingHelpers.textWidth(firstChar, font: ctx.latexMarkerFont)
+                            .kern: entry.size.width - markerFontWidth(firstChar)
                         ]))
 
                         if contentLength > 1 {
@@ -121,7 +132,7 @@ extension MarkdownStyler {
                             attrs.append((restRange, [
                                 .foregroundColor: NSColor.clear,
                                 .font: ctx.latexMarkerFont,
-                                .kern: -HeadingHelpers.textWidth(restText, font: ctx.latexMarkerFont)
+                                .kern: -markerFontWidth(restText)
                             ]))
                         }
                     }

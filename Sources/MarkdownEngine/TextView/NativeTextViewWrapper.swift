@@ -272,7 +272,11 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         textView.isAutomaticDashSubstitutionEnabled = false
         textView.onPasteImage = onPasteImage
         if #available(macOS 15.1, *) {
-            textView.writingToolsBehavior = .complete
+            // `.limited` = the Writing Tools popover panel; `.complete` = the inline
+            // experience that morphs the text with an animation. We use `.limited` so
+            // rewrites/proofread land in the popover (no in-text animation) — it also
+            // sidesteps the inline-rewrite flicker that dims text below the selection.
+            textView.writingToolsBehavior = .limited
         }
         // Create TextKit 2 layout bridge
         let bridge = LayoutBridge(textLayoutManager)
@@ -371,7 +375,9 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
     }
 
     public func updateNSView(_ nsView: NSScrollView, context: Context) {
-        guard let textView = nsView.nativeTextView else { return }
+        guard let textView = nsView.nativeTextView else {
+            return
+        }
         reconcileHeader(textView: textView, context: context)
 
         let isNodeSwitch = context.coordinator.documentId != documentId
@@ -579,7 +585,14 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         let font = NSFont(name: fontName, size: fontSize) ?? NSFont.systemFont(ofSize: fontSize)
         textView.font = font
         textView.baseFont = font
-        textView.recalcOverscroll(for: nsView)
+        // Skip on switch: textView.string still holds the OUTGOING doc here, so the "?"
+        // tag would force a full ensureLayout of the doc about to be discarded (~274ms /
+        // 7714 frags @346k). recalcOverscroll#2 after the rebuild measures the new doc;
+        // scroll is parked at top so clampToInsets below stays in range. Non-switch
+        // updates (font change, typing) must keep the forced full layout.
+        if !isNodeSwitch {
+            textView.recalcOverscroll(for: nsView)
+        }
         (nsView as? ClampedScrollView)?.clampToInsets()
 
         // Sync coordinator's font fields BEFORE the rebuild so the helper
