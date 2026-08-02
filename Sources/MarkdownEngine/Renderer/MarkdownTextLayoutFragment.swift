@@ -35,6 +35,20 @@ extension NSAttributedString.Key {
     static let scrollableBlockFullRange = NSAttributedString.Key("ScrollableBlockFullRange")
 }
 
+public extension NSAttributedString.Key {
+    /// NSColor — a background painted across the whole LINE BOX (the line
+    /// fragment's typographic bounds) instead of the glyph box AppKit's
+    /// `.backgroundColor` covers. Use it for marker-style fills: a span that
+    /// wraps over several lines then reads as one solid block, at any font
+    /// size and with any `paragraph.lineHeightExtraSpacing`, where
+    /// `.backgroundColor` leaves a gap between every pair of lines.
+    ///
+    /// Painted by `MarkdownTextLayoutFragment`, so it renders in the editor
+    /// only — table cells rasterize their own text and fall back to
+    /// `.backgroundColor` (see `MarkdownStyler+Tables`).
+    static let markdownBlockBackground = NSAttributedString.Key("MarkdownBlockBackground")
+}
+
 final class MarkdownTextLayoutFragment: NSTextLayoutFragment {
 
     /// Horizontal space (points) each blockquote nesting level occupies —
@@ -70,6 +84,10 @@ final class MarkdownTextLayoutFragment: NSTextLayoutFragment {
         for rect in blockImageRects(at: .zero) {
             bounds = bounds.union(rect)
         }
+        // Line-box fills are taller than the glyphs they sit behind.
+        for fill in blockBackgroundFills(at: .zero) {
+            bounds = bounds.union(fill.rect)
+        }
         return bounds
     }
 
@@ -78,6 +96,9 @@ final class MarkdownTextLayoutFragment: NSTextLayoutFragment {
     override func draw(at point: CGPoint, in context: CGContext) {
         // 1. Code-block backgrounds (behind text)
         drawCodeBlockBackground(at: point, in: context)
+
+        // 1b. Line-box fills (`==highlight==` and friends), behind text
+        drawBlockBackgrounds(at: point, in: context)
 
         // 2. LaTeX images (behind text — hidden markers are invisible anyway)
         drawLatexImages(at: point, in: context)
@@ -299,6 +320,63 @@ final class MarkdownTextLayoutFragment: NSTextLayoutFragment {
         return abs(colorRGB.redComponent - currentBgRGB.redComponent) < tolerance &&
                abs(colorRGB.greenComponent - currentBgRGB.greenComponent) < tolerance &&
                abs(colorRGB.blueComponent - currentBgRGB.blueComponent) < tolerance
+    }
+
+    // MARK: - Line-Box Backgrounds
+
+    /// Fill rects for every `.markdownBlockBackground` run in this fragment,
+    /// one per line the run touches, relative to `point`.
+    ///
+    /// Each rect spans the line fragment's full typographic bounds — the same
+    /// box the blockquote bars use, which is why a run of them reads as one
+    /// continuous shape. AppKit's own `.backgroundColor` fill is the glyph box
+    /// instead (ascent + descent), so it falls short of the line height by the
+    /// leading plus `paragraph.lineHeightExtraSpacing` and a wrapped highlight
+    /// comes out as stacked bands.
+    func blockBackgroundFills(at point: CGPoint) -> [(rect: CGRect, color: NSColor)] {
+        guard let ts = textStorage, let range = fragmentNSRange, range.length > 0 else { return [] }
+        var fills: [(rect: CGRect, color: NSColor)] = []
+        ts.enumerateAttribute(.markdownBlockBackground, in: range, options: []) { value, attrRange, _ in
+            guard let color = value as? NSColor else { return }
+            let local = NSRange(location: attrRange.location - range.location, length: attrRange.length)
+            for lineFragment in textLineFragments {
+                let lineRange = lineFragment.characterRange
+                let hit = NSIntersectionRange(lineRange, local)
+                guard hit.length > 0 else { continue }
+                let tb = lineFragment.typographicBounds
+                let startX = lineFragment.locationForCharacter(at: hit.location).x
+                // A run reaching the line's end fills to the line's own width:
+                // the index one past the line belongs to the next fragment, and
+                // asking this one for it is undefined.
+                let reachesEnd = hit.location + hit.length >= lineRange.location + lineRange.length
+                let endX = reachesEnd
+                    ? tb.width
+                    : lineFragment.locationForCharacter(at: hit.location + hit.length).x
+                guard endX > startX else { continue }
+                fills.append((
+                    rect: CGRect(x: point.x + tb.origin.x + startX,
+                                 y: point.y + tb.origin.y,
+                                 width: endX - startX,
+                                 height: tb.height),
+                    color: color
+                ))
+            }
+        }
+        return fills
+    }
+
+    private func drawBlockBackgrounds(at point: CGPoint, in context: CGContext) {
+        let fills = blockBackgroundFills(at: point)
+        guard !fills.isEmpty else { return }
+
+        NSGraphicsContext.saveGraphicsState()
+        defer { NSGraphicsContext.restoreGraphicsState() }
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: true)
+
+        for fill in fills {
+            fill.color.setFill()
+            NSBezierPath(rect: fill.rect).fill()
+        }
     }
 
     // MARK: - LaTeX / Block Image Helpers

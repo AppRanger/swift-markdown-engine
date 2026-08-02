@@ -417,8 +417,16 @@ extension MarkdownStyler {
                     recurse(extNode.children, font)
                 }
                 if out.length > start, let ext = extensionsByID[extNode.extensionID] {
-                    out.addAttributes(ext.contentAttributes(theme: theme),
-                                      range: NSRange(location: start, length: out.length - start))
+                    let span = NSRange(location: start, length: out.length - start)
+                    var attributes = ext.contentAttributes(theme: theme)
+                    // A cell rasterizes through NSAttributedString drawing, which
+                    // knows nothing of the line-box fill the layout fragment paints
+                    // — fall back to the glyph-box background so a highlight inside
+                    // a table still has one.
+                    if let fill = attributes.removeValue(forKey: .markdownBlockBackground) {
+                        attributes[.backgroundColor] = fill
+                    }
+                    out.addAttributes(attributes, range: span)
                 }
             case .code(_, let content):
                 out.append(NSAttributedString(string: ns.substring(with: content), attributes: [

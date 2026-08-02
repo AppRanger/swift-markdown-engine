@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `NSAttributedString.Key.markdownBlockBackground` — a background painted
+  across the whole line box by `MarkdownTextLayoutFragment` instead of the
+  glyph box AppKit's `.backgroundColor` covers. Embedder extensions can use it
+  wherever a fill should read as a block.
+
+### Changed
+- `==highlight==` fills the line box. AppKit paints `.backgroundColor` over
+  ascent + descent only, so the marker fell short of the line height by the
+  leading plus `paragraph.lineHeightExtraSpacing`, and a highlight that wrapped
+  came out as a stack of bands. `HighlightExtension` returns
+  `.markdownBlockBackground` now, so the block is continuous at any font size.
+  Table cells rasterize their own text and keep the glyph-box fill.
+
 ## [0.11.0] - 2026-07-31
 
 ### Added
