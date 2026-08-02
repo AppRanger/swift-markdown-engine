@@ -19,7 +19,7 @@
 </video>
 
 
-A native AppKit Markdown editor for macOS, built on TextKit 2 and bridged to SwiftUI. Brought to you by **[Nodes](https://apps.apple.com/app/apple-store/id6745401961?pt=127809373&ct=github&mt=8)**. Live styling, wiki-link support, fenced code blocks with syntax highlighting, LaTeX rendering, embedded images, and GitHub-style task
+A native AppKit Markdown editor for macOS, built on TextKit 2 and bridged to SwiftUI. It is the editor inside **[Nodes](https://apps.apple.com/app/apple-store/id6745401961?pt=127809373&ct=github&mt=8)**, a macOS notes app. Live styling, wiki-link support, fenced code blocks with syntax highlighting, LaTeX rendering, embedded images, and GitHub-style task
 checkboxes.
 
 ## Features
@@ -319,6 +319,34 @@ MarkdownEngine is currently **pre-1.0**. The public API may change between
 minor releases as it stabilizes. Production use is fine — pin a specific
 version (`0.x.y`) in your `Package.swift`.
 
+## Who makes it
+
+<a href="https://apps.apple.com/app/apple-store/id6745401961?pt=127809373&ct=github&mt=8">
+  <img align="right" width="96" alt="Nodes" src="media/nodes-app-icon.png" />
+</a>
+
+MarkdownEngine is the editor inside **[Nodes](https://apps.apple.com/app/apple-store/id6745401961?pt=127809373&ct=github&mt=8)**,
+a macOS app for writing, linking and exploring notes that stay as plain files on
+your disk. This is not a side project we open-sourced and walked away from — it is
+the editor our own users type in every day, and every fix here ships in a real app
+first. It is on the [Mac App Store](https://apps.apple.com/app/apple-store/id6745401961?pt=127809373&ct=github&mt=8).
+
+### If it helped you
+
+You owe us nothing — this is Apache 2.0, given without strings. If you do want to
+give something back, the useful currency is not money, it is other people knowing
+this exists:
+
+- Tell someone who is fighting TextKit 2. Smaller club than it should be.
+- Write up what you built with it and tag [@nodes.app](https://www.instagram.com/nodes.app) — we will share it.
+- If you shipped with it, take the badge:
+
+  ```md
+  [![Built with MarkdownEngine](https://img.shields.io/badge/built%20with-MarkdownEngine-F05138)](https://github.com/nodes-app/swift-markdown-engine)
+  ```
+
+Using it and mentioning it once to the right person is already the whole thing.
+
 ## Contributing
 
 Bug reports, ideas, and pull requests are welcome.
@@ -334,4 +362,4 @@ MarkdownEngine is released under the Apache 2.0 License. See [LICENSE](LICENSE)
 for the full text.
 
 ---
-Built by small team from Germany. Day-to-day on [Instagram](https://www.instagram.com/nodes.app).
+Built by a small team in Munich and Zurich. Day-to-day on [Instagram](https://www.instagram.com/nodes.app).
