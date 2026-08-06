@@ -646,7 +646,11 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
                 nsView.reflectScrolledClipView(nsView.contentView)
                 (nsView as? ClampedScrollView)?.clampToInsets()
                 let landed = abs(nsView.contentView.bounds.origin.y - savedY) < 1
-                if landed || context.coordinator.pendingScrollRestoreAttempts <= 0 {
+                // Also give up once the real content has had its chance, landed or
+                // not: an armed latch outliving the document's arrival lets a much
+                // later unrelated pass — ⌘+/⌘−, the raw-source toggle, a buffer
+                // reload — scroll the reader away from wherever they went.
+                if landed || !text.isEmpty || context.coordinator.pendingScrollRestoreAttempts <= 0 {
                     context.coordinator.pendingScrollRestoreDocumentId = nil
                 }
             } else {
@@ -698,7 +702,11 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
     /// different screen — and that is the only moment left to record where the
     /// reader was; the coordinator's own offsets die with it.
     public static func dismantleNSView(_ nsView: NSScrollView, coordinator: Coordinator) {
-        guard let documentId = coordinator.documentId else { return }
+        // A restore still pending means the reader was never put back where they
+        // were — recording the current offset would overwrite the good one with
+        // the mid-load position.
+        guard let documentId = coordinator.documentId,
+              coordinator.pendingScrollRestoreDocumentId == nil else { return }
         coordinator.onPersistScrollOffset?(documentId, nsView.contentView.bounds.origin.y)
     }
 }

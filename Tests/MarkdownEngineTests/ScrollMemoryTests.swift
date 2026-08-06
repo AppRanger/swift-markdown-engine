@@ -67,6 +67,18 @@ struct ScrollMemoryTests {
         #expect(callCount == 0)
     }
 
+    @Test("Teardown mid-restore keeps the remembered offset instead of the load position")
+    func dismantleDuringPendingRestorePersistsNothing() {
+        var callCount = 0
+        let coordinator = makeCoordinator(documentId: "note-a")
+        coordinator.onPersistScrollOffset = { _, _ in callCount += 1 }
+        coordinator.armScrollRestore(for: "note-a")
+
+        NativeTextViewWrapper.dismantleNSView(makeScrollView(scrolledTo: 0), coordinator: coordinator)
+
+        #expect(callCount == 0)
+    }
+
     @Test("Arming latches the document and gives it a bounded retry budget")
     func armingLatchesWithBudget() {
         let coordinator = makeCoordinator(documentId: "note-a")
