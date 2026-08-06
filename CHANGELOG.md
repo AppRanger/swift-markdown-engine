@@ -33,6 +33,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `.markdownBlockBackground` now, so the block is continuous at any font size.
   Table cells rasterize their own text and keep the glyph-box fill.
 
+### Fixed
+- Initially narrow tables reflow when the editor width shrinks instead of
+  retaining stale image geometry until an unrelated full restyle.
+
 ## [0.11.0] - 2026-07-31
 
 ### Added

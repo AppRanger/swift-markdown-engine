@@ -299,6 +299,7 @@ extension MarkdownStyler {
         paragraphSpacing: CGFloat,
         alignment: NSTextAlignment,
         mode: RenderedStandaloneBlockMode,
+        restyleOnWidthChange: Bool = false,
         ctx: StylingContext,
         attrs: inout [StyledRange]
     ) -> Bool {
@@ -308,6 +309,9 @@ extension MarkdownStyler {
         let baseLineHeight = layoutBridgeDefaultLineHeight(for: ctx.baseFont, using: ctx.layoutBridge)
         para.paragraphSpacingBefore = max(para.paragraphSpacingBefore, paragraphSpacingBefore)
         para.alignment = alignment
+        let widthChangeAnchorAttrs: [NSAttributedString.Key: Any] = restyleOnWidthChange
+            ? [.scrollableBlockFullRange: NSValue(range: paraRange)]
+            : [:]
 
         switch mode {
         case .collapsedSource(let markerTexts):
@@ -321,7 +325,7 @@ extension MarkdownStyler {
                 paraRange: paraRange,
                 advanceWidth: imageBounds.width,
                 neededLineHeight: imageBounds.height,
-                extraAnchorAttrs: [:],
+                extraAnchorAttrs: widthChangeAnchorAttrs,
                 markerTexts: markerTexts,
                 ctx: ctx,
                 attrs: &attrs
@@ -330,6 +334,10 @@ extension MarkdownStyler {
         case .collapsedSourceScrollable(let markerTexts, let displayWidth, let sourceID):
             let scrollerStrip = MarkdownTextLayoutFragment.scrollableBlockScrollerStrip
             let totalHeight = imageBounds.height + scrollerStrip
+            var anchorAttrs = widthChangeAnchorAttrs
+            anchorAttrs[.scrollableBlockNaturalWidth] = imageBounds.width
+            anchorAttrs[.scrollableBlockSourceID] = sourceID
+            anchorAttrs[.scrollableBlockTotalHeight] = totalHeight
             emitCollapsedAttrs(
                 token: token,
                 rawContent: rawContent,
@@ -340,12 +348,7 @@ extension MarkdownStyler {
                 paraRange: paraRange,
                 advanceWidth: displayWidth,
                 neededLineHeight: totalHeight,
-                extraAnchorAttrs: [
-                    .scrollableBlockNaturalWidth: imageBounds.width,
-                    .scrollableBlockSourceID: sourceID,
-                    .scrollableBlockTotalHeight: totalHeight,
-                    .scrollableBlockFullRange: NSValue(range: paraRange)
-                ],
+                extraAnchorAttrs: anchorAttrs,
                 markerTexts: markerTexts,
                 ctx: ctx,
                 attrs: &attrs

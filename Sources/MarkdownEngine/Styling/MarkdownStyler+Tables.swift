@@ -270,6 +270,7 @@ extension MarkdownStyler {
                 paragraphSpacing: ctx.baseDefaultLineHeight * 0.5,
                 alignment: .left,
                 mode: mode,
+                restyleOnWidthChange: true,
                 ctx: ctx,
                 attrs: &attrs
             )
