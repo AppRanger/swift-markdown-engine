@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `onPersistScrollOffset` / `restoreScrollOffset` on `NativeTextViewWrapper` —
+  scroll memory an embedder can keep somewhere that outlives the editor. The
+  engine's own per-document offsets live on the coordinator, so an embedder that
+  routes to a different screen and back lost them: nothing recorded the offset on
+  the way out (there was no `dismantleNSView` at all), and the restore was gated
+  on a document switch, which a remount is not — `makeCoordinator` seeds
+  `documentId`, so the first update pass never looks like one. Teardown now hands
+  the offset over, and the restore is latched instead of gated, retrying for a
+  bounded few passes because the first pass after a remount still carries the
+  embedder's empty buffer. Both closures are asked at call time, so the
+  embedder's own retention rules can see changes made on the way out. Passing
+  neither leaves behavior unchanged.
+
 - `NSAttributedString.Key.markdownBlockBackground` — a background painted
   across the whole line box by `MarkdownTextLayoutFragment` instead of the
   glyph box AppKit's `.backgroundColor` covers. Embedder extensions can use it

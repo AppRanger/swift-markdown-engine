@@ -71,6 +71,8 @@ extension NativeTextViewCoordinator {
     public func textDidChange(_ notification: Notification) {
         guard let tv = notification.object as? NSTextView else { return }
         PerfTrace.checkpoint("didIn")
+        // Typing means the reader is here, so an unlanded restore must not fire.
+        pendingScrollRestoreDocumentId = nil
         // Before the early returns: the first keystroke must hide the placeholder.
         (tv as? NativeTextView)?.refreshPlaceholderVisibility()
         // Raw mode: display IS storage — sync the binding, skip the restyle.
