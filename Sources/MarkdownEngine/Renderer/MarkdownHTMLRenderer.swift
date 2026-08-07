@@ -192,22 +192,25 @@ public enum MarkdownHTMLRenderer {
 
     // MARK: - Inlines
 
-    private static func renderInlines(_ nodes: [InlineNode], ns: NSString, env: Env) -> String {
+    /// `linkable` is false inside an explicit link's title text, where wrapping
+    /// a URL-shaped run in its own anchor would nest `<a>` inside `<a>`.
+    private static func renderInlines(_ nodes: [InlineNode], ns: NSString, env: Env, linkable: Bool = true) -> String {
         var out = ""
-        for node in nodes { out += renderInline(node, ns: ns, env: env) }
+        for node in nodes { out += renderInline(node, ns: ns, env: env, linkable: linkable) }
         return out
     }
 
-    private static func renderInline(_ node: InlineNode, ns: NSString, env: Env) -> String {
+    private static func renderInline(_ node: InlineNode, ns: NSString, env: Env, linkable: Bool = true) -> String {
         switch node {
         case .text(let r):
-            return escape(ns.substring(with: r))
+            let s = ns.substring(with: r)
+            return linkable ? escapeAndAutolink(s) : escape(s)
 
         case .code(_, let content):
             return "<code>\(escape(ns.substring(with: content)))</code>"
 
         case .emphasis(let kind, _, _, let children):
-            let inner = renderInlines(children, ns: ns, env: env)
+            let inner = renderInlines(children, ns: ns, env: env, linkable: linkable)
             switch kind {
             case .italic:     return "<em>\(inner)</em>"
             case .bold:       return "<strong>\(inner)</strong>"
@@ -215,7 +218,7 @@ public enum MarkdownHTMLRenderer {
             }
 
         case .link(_, _, let url, _, let children):
-            return "<a href=\"\(escape(ns.substring(with: url)))\">\(renderInlines(children, ns: ns, env: env))</a>"
+            return "<a href=\"\(escape(ns.substring(with: url)))\">\(renderInlines(children, ns: ns, env: env, linkable: false))</a>"
 
         case .image(_, let alt, let url, _):
             return "<img src=\"\(escape(ns.substring(with: url)))\" alt=\"\(escape(ns.substring(with: alt)))\">"
@@ -233,7 +236,7 @@ public enum MarkdownHTMLRenderer {
             }
             let inner = node.children.isEmpty
                 ? escape(ns.substring(with: node.contentRange))
-                : renderInlines(node.children, ns: ns, env: env)
+                : renderInlines(node.children, ns: ns, env: env, linkable: linkable)
             return ext.html(childrenHTML: inner)
 
         case .inlineLatex(let range, _, _):
@@ -242,6 +245,37 @@ public enum MarkdownHTMLRenderer {
         case .escape(_, let character, _):
             return escape(ns.substring(with: character))
         }
+    }
+
+    // MARK: - Autolinking
+
+    // Built once: rebuilding the detector per render is the styler's documented
+    // 43ms trap (ENG-8g1b).
+    private static let autoLinkDetector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
+
+    /// Escape a text run, wrapping bare URLs/emails in anchors. The editor's
+    /// styler linkifies these via the same system detector, but rich-paste
+    /// consumers (Mail, Outlook) take the pasteboard's HTML/RTF flavor verbatim
+    /// and never run their own link detection on it — without a real `<a>` a
+    /// URL that is clickable in the editor pastes as dead text. Code spans
+    /// never reach this path (they are their own inline node), matching the
+    /// styler's in-code exclusion.
+    private static func escapeAndAutolink(_ s: String) -> String {
+        guard let detector = autoLinkDetector else { return escape(s) }
+        let ns = s as NSString
+        let matches = detector.matches(in: s, range: NSRange(location: 0, length: ns.length))
+        guard !matches.isEmpty else { return escape(s) }
+
+        var out = ""
+        var cursor = 0
+        for match in matches {
+            guard let url = match.url else { continue }
+            out += escape(ns.substring(with: NSRange(location: cursor, length: match.range.location - cursor)))
+            out += "<a href=\"\(escape(url.absoluteString))\">\(escape(ns.substring(with: match.range)))</a>"
+            cursor = NSMaxRange(match.range)
+        }
+        out += escape(ns.substring(from: cursor))
+        return out
     }
 
     // MARK: - Escaping

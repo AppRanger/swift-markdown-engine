@@ -34,6 +34,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Table cells rasterize their own text and keep the glyph-box fill.
 
 ### Fixed
+- Bare URLs and emails survive rich copy as real links. The editor styler
+  linkifies them with `NSDataDetector`, but the HTML renderer emitted them as
+  plain text, so the pasteboard's HTML/RTF/web-archive flavors carried no
+  anchor — and rich-paste consumers (Mail, Outlook) run no link detection of
+  their own, leaving a URL that is clickable in the editor to paste as dead
+  text. `MarkdownHTMLRenderer` now wraps detector matches in `<a href>`
+  (emails as `mailto:`) using the same system detector as the styler; the RTF
+  and web-archive flavors are derived from that HTML, so all three inherit
+  the link. Explicit `[title](url)` links were already correct; a URL-shaped
+  run inside a link's own title stays plain so anchors never nest, and code
+  spans remain excluded, matching the styler.
 - Initially narrow tables reflow when the editor width shrinks instead of
   retaining stale image geometry until an unrelated full restyle.
 
