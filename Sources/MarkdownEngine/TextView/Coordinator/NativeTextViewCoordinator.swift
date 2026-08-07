@@ -20,8 +20,20 @@ import SwiftUI
 public final class NativeTextViewCoordinator: NSObject, NSTextViewDelegate {
     var documentId: String?
     /// Remembered scroll offset (`bounds.origin.y`) per `documentId` — saved on
-    /// switch-away, restored on switch-back.
+    /// switch-away, restored on switch-back. Dies with the coordinator, so an
+    /// embedder that unmounts the editor supplies the two closures below instead.
     var scrollOffsets: [String: CGFloat] = [:]
+    /// Embedder-owned scroll memory that outlives this coordinator. `persist` is
+    /// also called from `dismantleNSView`; `restore` returning nil opens at top.
+    var onPersistScrollOffset: ((String, CGFloat) -> Void)?
+    var restoreScrollOffset: ((String) -> CGFloat?)?
+    /// documentId whose remembered offset still has to be applied, and how many
+    /// update passes it may keep trying. A remount is not a switch (SwiftUI seeds
+    /// `documentId` in `makeCoordinator`) and its first pass still carries the
+    /// embedder's empty buffer, so the offset can only land on a later pass. The
+    /// budget bounds it: a document that really got shorter must not keep yanking.
+    var pendingScrollRestoreDocumentId: String?
+    var pendingScrollRestoreAttempts = 0
     /// Per-`documentId` undo manager. AppKit reuses a single `NSTextView` across
     /// all open documents, so its built-in (view-wide) undo manager would mix
     /// files together. Keying a manager on the current document gives each file
@@ -403,6 +415,13 @@ public final class NativeTextViewCoordinator: NSObject, NSTextViewDelegate {
 
     // Find-in-document highlight handlers live in
     // `NativeTextViewCoordinator+Find.swift`.
+
+    /// Four passes: a remount needs two (empty buffer, then the real content) and
+    /// the header's hosting view can still resolve its height after that.
+    func armScrollRestore(for documentId: String) {
+        pendingScrollRestoreDocumentId = documentId
+        pendingScrollRestoreAttempts = 4
+    }
 
     func wikiLinkID(for range: NSRange) -> String? {
         wikiLinkMetadata[WikiLinkService.RangeKey(range)]?.id
