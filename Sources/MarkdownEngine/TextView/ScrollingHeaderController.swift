@@ -87,16 +87,26 @@ final class ScrollingHeaderController {
         animationToken += 1
         settledToken = animationToken   // no animation in flight after teardown
         animationTargetHeight = nil
+        // Observers first, and the state they guard on before the views are detached:
+        // `removeFromSuperview()` lays out, which fires the HOST observer synchronously
+        // (queue: nil). Reached with `lastExpanded`/`constantConstraint` still set, it
+        // passes every guard and starts an animation — advancing `animationToken` right
+        // after this method equalised it, so the controller believes an animation is in
+        // flight for the rest of its life.
         if let clipFrameObserver {
             NotificationCenter.default.removeObserver(clipFrameObserver)
             self.clipFrameObserver = nil
         }
-        clipView?.removeFromSuperview()
-        clipView = nil
-        hostingView = nil
+        if let hostFrameObserver {
+            NotificationCenter.default.removeObserver(hostFrameObserver)
+            self.hostFrameObserver = nil
+        }
+        lastExpanded = nil
         equalityConstraint = nil
         constantConstraint = nil
-        lastExpanded = nil
+        hostingView = nil
+        clipView?.removeFromSuperview()
+        clipView = nil
         container?.headerHeight = 0   // → restack: text view back to y=0, container shrinks
     }
 
@@ -230,6 +240,13 @@ final class ScrollingHeaderController {
         // moving value, so the comparison has to be against the target it is heading for.
         let pending = (animationToken == settledToken) ? constantC.constant
                                                        : (animationTargetHeight ?? constantC.constant)
+        // `> 0` is load-bearing: an un-laid-out host reports 0, and accepting that here
+        // drives the band to zero and desynchronises it from the expansion state
+        // (proven — allowing 0 swaps the expand and collapse test outcomes). The cost is
+        // that a header which legitimately EMPTIES cannot collapse the band: zero is
+        // both "not measured yet" and "nothing to show", and the two are not
+        // distinguishable from the height alone. Such an embedder must collapse the
+        // header via `headerExpanded` instead of by emptying its content.
         guard target > 0, abs(target - pending) > 0.5 else { return }
 
         // A live window resize reflows the inspector continuously, and an offscreen
