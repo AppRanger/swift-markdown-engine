@@ -28,6 +28,11 @@ final class ScrollingHeaderController {
     private var constantConstraint: NSLayoutConstraint?
     /// Observes the clip's height; the SOLE writer of `container.headerHeight`.
     private var clipFrameObserver: NSObjectProtocol?
+    /// Observes the HOSTED view's height. While expanded the clip is held by the
+    /// animatable constant constraint, so a content change reaches the band only
+    /// through here — and it reaches it BEFORE the band has moved, which is the whole
+    /// point (see `hostHeightChanged`).
+    private var hostFrameObserver: NSObjectProtocol?
     /// Last applied expanded state, to detect toggles.
     private var lastExpanded: Bool?
     /// Invalidates stale animation completions when a new toggle interrupts one.
@@ -50,7 +55,11 @@ final class ScrollingHeaderController {
         if let clipFrameObserver {
             NotificationCenter.default.removeObserver(clipFrameObserver)
         }
+        if let hostFrameObserver {
+            NotificationCenter.default.removeObserver(hostFrameObserver)
+        }
     }
+
 
     /// Build the header on first call; afterwards refresh the hosted content
     /// (every call — the embedder's view may capture changing values) and apply
@@ -178,7 +187,52 @@ final class ScrollingHeaderController {
         }
 
         container.layoutSubtreeIfNeeded()
+
+        // Expanded: hand the clip straight to the constant constraint, seeded with the
+        // height equality just resolved. From here on the band is OWNED by the constant
+        // and content changes arrive via `hostHeightChanged` — if the equality
+        // constraint kept the clip, Auto Layout would resize the band to the new content
+        // before anything could animate it, and the reveal would start from a frame
+        // already showing the end state (measured: clip=782 while the band read 913).
+        if expanded, let equalityC = equalityConstraint, let constantC = constantConstraint,
+           let clip = clipView, clip.frame.height > 0 {
+            constantC.constant = clip.frame.height
+            equalityC.isActive = false
+            constantC.isActive = true
+        }
+        host.postsFrameChangedNotifications = true
+        hostFrameObserver = NotificationCenter.default.addObserver(
+            forName: NSView.frameDidChangeNotification, object: host, queue: nil
+        ) { [weak self, weak container] _ in
+            MainActor.assumeIsolated {
+                guard let self, let container else { return }
+                self.hostHeightChanged(container: container)
+            }
+        }
+
         container.headerHeight = reservedHeight
+    }
+
+    /// The hosted content changed height while the header is expanded — a second
+    /// inspector section opened or closed. The clip is on the constant constraint, so
+    /// the band has NOT moved yet: animate it to the content's new height with the
+    /// crossing's own curve, and the reveal starts where the reader last saw it.
+    private func hostHeightChanged(container: NativeTextViewContainer) {
+        guard lastExpanded == true,
+              animationToken == settledToken,               // no crossing in flight
+              let constantC = constantConstraint, constantC.isActive,
+              let host = hostingView else { return }
+        let target = host.frame.height
+        guard target > 0, abs(target - constantC.constant) > 0.5 else { return }
+
+        // A live window resize reflows the inspector continuously, and an offscreen
+        // container is still settling its first layout — neither is a disclosure, so
+        // track those directly instead of animating them.
+        guard !container.inLiveResize, container.window != nil else {
+            constantC.constant = target
+            return
+        }
+        animate(to: target, expandedAfter: true, container: container)
     }
 
     private func applyExpansion(
@@ -222,7 +276,10 @@ final class ScrollingHeaderController {
                 container.layoutSubtreeIfNeeded()
             }
         }
-        // Expanded steady: the equality constraint already tracks the content.
+        // Expanded steady: nothing to do here. The band is held by the constant
+        // constraint and follows content through `hostHeightChanged`, which sees a
+        // disclosure the moment the hosted view resizes — earlier than this reconcile,
+        // which an embedder may skip entirely when its own state has not changed.
     }
 
     /// Tracks whether an animation is in flight: `animationToken` advances on every
@@ -241,12 +298,10 @@ final class ScrollingHeaderController {
             guard token == animationToken else { return }   // interrupted by a newer toggle
             settledToken = token
             animationTargetHeight = nil
-            if expandedAfter, let equalityC = equalityConstraint, let constantC = constantConstraint {
-                // Hand back to the live-tracking equality constraint.
-                constantC.isActive = false
-                equalityC.isActive = true
-                clipView?.superview?.layoutSubtreeIfNeeded()
-            }
+            // The clip STAYS on the constant constraint while expanded. Handing it back
+            // to the live-tracking equality constraint is what let a later disclosure
+            // resize the band in one layout pass before anything could animate it; the
+            // band now follows content through `hostHeightChanged` instead.
             // One clamp once the height has settled (skipped during the animation).
             (container.enclosingScrollView as? ClampedScrollView)?.clampToInsets()
         }
