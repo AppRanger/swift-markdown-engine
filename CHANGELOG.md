@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-08-10
+
 ### Added
 - `onPersistScrollOffset` / `restoreScrollOffset` on `NativeTextViewWrapper` —
   scroll memory an embedder can keep somewhere that outlives the editor. The
@@ -49,15 +51,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Bare URLs and emails survive rich copy as real links. The editor styler
   linkifies them with `NSDataDetector`, but the HTML renderer emitted them as
-  plain text, so the pasteboard's HTML/RTF/web-archive flavors carried no
-  anchor — and rich-paste consumers (Mail, Outlook) run no link detection of
-  their own, leaving a URL that is clickable in the editor to paste as dead
-  text. `MarkdownHTMLRenderer` now wraps detector matches in `<a href>`
-  (emails as `mailto:`) using the same system detector as the styler; the RTF
-  and web-archive flavors are derived from that HTML, so all three inherit
-  the link. Explicit `[title](url)` links were already correct; a URL-shaped
-  run inside a link's own title stays plain so anchors never nest, and code
-  spans remain excluded, matching the styler.
+  plain text, so the pasteboard's HTML/RTF/web-archive flavors carried no anchor
+  at all, and whether a copied URL arrived clickable was left to the receiving
+  app — Apple Mail runs its own detection and linkifies anyway, a consumer that
+  takes the rich flavor verbatim pastes dead text. `MarkdownHTMLRenderer` now
+  wraps detector matches in `<a href>` (emails as `mailto:`) using the same
+  system detector as the styler; the RTF and web-archive flavors are derived
+  from that HTML, so all three inherit the link. Explicit `[title](url)` links
+  were already correct; a URL-shaped run inside a link's own title stays plain
+  so anchors never nest, and code spans remain excluded, matching the styler.
+  Table cells are unaffected: they render no inline markup on the copy path.
+- Markdown link labels may hold inline code and escaped punctuation —
+  ``[`App`](/tmp/App.swift:56)`` stayed literal. Code spans and escapes are
+  claimed before links so they stay opaque, and the link pass rejected every
+  candidate overlapping a claimed span, including one lying entirely inside the
+  label. Spans contained in the label are permitted now, links act as
+  containers when the tree is built, and partial overlaps or spans crossing the
+  label boundary are still rejected.
 - Initially narrow tables reflow when the editor width shrinks instead of
   retaining stale image geometry until an unrelated full restyle.
 
