@@ -219,17 +219,32 @@ final class ScrollingHeaderController {
     /// crossing's own curve, and the reveal starts where the reader last saw it.
     private func hostHeightChanged(container: NativeTextViewContainer) {
         guard lastExpanded == true,
-              animationToken == settledToken,               // no crossing in flight
               let constantC = constantConstraint, constantC.isActive,
               let host = hostingView else { return }
         let target = host.frame.height
-        guard target > 0, abs(target - constantC.constant) > 0.5 else { return }
+        // RETARGET rather than ignore while an animation is in flight. Dropping the
+        // change loses it for good — the band is held by the constant constraint for
+        // the whole expanded state, so nothing comes along later to correct it. Toggling
+        // a section twice in quick succession then finished on the height of the OPEN
+        // state while the content was already closed. Mid-flight the constant is a
+        // moving value, so the comparison has to be against the target it is heading for.
+        let pending = (animationToken == settledToken) ? constantC.constant
+                                                       : (animationTargetHeight ?? constantC.constant)
+        guard target > 0, abs(target - pending) > 0.5 else { return }
 
         // A live window resize reflows the inspector continuously, and an offscreen
         // container is still settling its first layout — neither is a disclosure, so
-        // track those directly instead of animating them.
+        // track those directly instead of animating them. Still through the animator
+        // at zero duration: a plain property set would leave an animation already in
+        // flight ticking toward its stale target underneath.
         guard !container.inLiveResize, container.window != nil else {
-            constantC.constant = target
+            animationToken += 1
+            settledToken = animationToken
+            animationTargetHeight = nil
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0
+                constantC.animator().constant = target
+            }
             return
         }
         animate(to: target, expandedAfter: true, container: container)
