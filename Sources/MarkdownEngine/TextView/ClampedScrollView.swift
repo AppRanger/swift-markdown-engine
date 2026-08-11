@@ -23,7 +23,37 @@ final class ClampedScrollView: NSScrollView {
         return NSSize(width: NSView.noIntrinsicMetric, height: container.scrollableContentHeight)
     }
 
+    /// Offset waiting for geometry. `updateNSView` runs on a SwiftUI state tick, where
+    /// the clip view can still be zero-height — a scroll applied there is accepted
+    /// verbatim (nothing to clamp against) and then discarded by the first real layout.
+    /// Restores are therefore handed here and applied from `layout()`, which is the
+    /// first moment the viewport and document heights actually exist.
+    private var pendingRestoreY: CGFloat?
+    /// Layout passes left to land it. The document keeps growing for a few passes after
+    /// a remount, so the first laid-out pass can still be too short for the offset.
+    private var pendingRestoreLayouts = 0
+
+    /// Restore `y` once the geometry can carry it.
+    func armScrollRestore(to y: CGFloat) {
+        guard !fitsContent else { return }
+        pendingRestoreY = y
+        pendingRestoreLayouts = 8
+    }
+
+    override func layout() {
+        super.layout()
+        guard let y = pendingRestoreY, contentView.bounds.height > 0 else { return }
+        pendingRestoreLayouts -= 1
+        contentView.scroll(to: NSPoint(x: contentView.bounds.origin.x, y: y))
+        reflectScrolledClipView(contentView)
+        clampToInsets()
+        let landed = abs(contentView.bounds.origin.y - y) < 1
+        if landed || pendingRestoreLayouts <= 0 { pendingRestoreY = nil }
+    }
+
     override func scrollWheel(with event: NSEvent) {
+        // The reader took over; never yank them back to a remembered offset.
+        pendingRestoreY = nil
         if fitsContent {
             // No scrollable range — forward to the responder chain so the
             // enclosing (SwiftUI) scroll view receives the event. In the

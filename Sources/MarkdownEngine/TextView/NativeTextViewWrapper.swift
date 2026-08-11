@@ -645,12 +645,30 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
                 nsView.contentView.scroll(to: NSPoint(x: nsView.contentView.bounds.origin.x, y: savedY))
                 nsView.reflectScrolledClipView(nsView.contentView)
                 (nsView as? ClampedScrollView)?.clampToInsets()
-                let landed = abs(nsView.contentView.bounds.origin.y - savedY) < 1
+                // A zero-height viewport cannot contradict any offset: with no range to
+                // clamp against the scroll is taken verbatim, so this is true for EVERY
+                // value — it says the offset was set, not that it survived. Believing it
+                // retires the latch before the geometry exists; the first real layout
+                // then clamps the reader back to the top and nothing is left to correct
+                // it. Measured on a remount after routing away: saved=201 actual=201
+                // landed=true viewportH=0.
+                let measured = nsView.contentView.bounds.height > 0
+                let landed = measured && abs(nsView.contentView.bounds.origin.y - savedY) < 1
                 // Also give up once the real content has had its chance, landed or
                 // not: an armed latch outliving the document's arrival lets a much
                 // later unrelated pass — ⌘+/⌘−, the raw-source toggle, a buffer
                 // reload — scroll the reader away from wherever they went.
-                if landed || !text.isEmpty || context.coordinator.pendingScrollRestoreAttempts <= 0 {
+                // The "content has arrived" give-up needs the same proof: a non-empty
+                // buffer laid out into nothing has not had its chance either.
+                if !measured {
+                    // No geometry on this tick: hand it to the scroll view, which applies
+                    // it from its own layout. Retiring the latch here is safe because the
+                    // offset is no longer waiting on another update pass — and those stop
+                    // coming (measured: two passes, both viewportH=0, then nothing, with
+                    // the latch left armed forever and teardown refusing to save).
+                    (nsView as? ClampedScrollView)?.armScrollRestore(to: savedY)
+                    context.coordinator.pendingScrollRestoreDocumentId = nil
+                } else if landed || !text.isEmpty || context.coordinator.pendingScrollRestoreAttempts <= 0 {
                     context.coordinator.pendingScrollRestoreDocumentId = nil
                 }
             } else {
