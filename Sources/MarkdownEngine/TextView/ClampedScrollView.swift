@@ -32,28 +32,49 @@ final class ClampedScrollView: NSScrollView {
     /// Layout passes left to land it. The document keeps growing for a few passes after
     /// a remount, so the first laid-out pass can still be too short for the offset.
     private var pendingRestoreLayouts = 0
+    /// A pass budget is not a time bound: passes only tick when one happens, so an
+    /// offset that never lands stays armed indefinitely and a much later relayout —
+    /// a find match, ⌘+, a window resize — replays it onto a reader who has long
+    /// since gone somewhere else. Restoring is only ever correct immediately after
+    /// the document arrives.
+    private var pendingRestoreDeadline: Date?
 
     /// Restore `y` once the geometry can carry it.
     func armScrollRestore(to y: CGFloat) {
         guard !fitsContent else { return }
         pendingRestoreY = y
         pendingRestoreLayouts = 8
+        pendingRestoreDeadline = Date(timeIntervalSinceNow: 1.0)
+    }
+
+    /// The reader (or something acting for them) moved the viewport — that position
+    /// wins over anything still queued. Every path that scrolls the clip view
+    /// directly must call this: find-match reveal, keyboard paging, drag-select
+    /// autoscroll. They bypass `scrollWheel` entirely.
+    func cancelPendingScrollRestore() {
+        pendingRestoreY = nil
+        pendingRestoreDeadline = nil
     }
 
     override func layout() {
         super.layout()
-        guard let y = pendingRestoreY, contentView.bounds.height > 0 else { return }
+        guard let y = pendingRestoreY else { return }
+        if let deadline = pendingRestoreDeadline, Date() > deadline {
+            cancelPendingScrollRestore()
+            return
+        }
+        guard contentView.bounds.height > 0 else { return }
         pendingRestoreLayouts -= 1
         contentView.scroll(to: NSPoint(x: contentView.bounds.origin.x, y: y))
         reflectScrolledClipView(contentView)
         clampToInsets()
         let landed = abs(contentView.bounds.origin.y - y) < 1
-        if landed || pendingRestoreLayouts <= 0 { pendingRestoreY = nil }
+        if landed || pendingRestoreLayouts <= 0 { cancelPendingScrollRestore() }
     }
 
     override func scrollWheel(with event: NSEvent) {
         // The reader took over; never yank them back to a remembered offset.
-        pendingRestoreY = nil
+        cancelPendingScrollRestore()
         if fitsContent {
             // No scrollable range — forward to the responder chain so the
             // enclosing (SwiftUI) scroll view receives the event. In the

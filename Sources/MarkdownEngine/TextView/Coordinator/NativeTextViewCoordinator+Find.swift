@@ -217,6 +217,7 @@ extension NativeTextViewCoordinator {
             // Only scroll when the match is off-screen; reveal it a little below the top.
             if frame.minY < visibleTop || frame.maxY > visibleBottom {
                 let targetY = frame.minY - insetsTop - cv.bounds.height * 0.2
+                (scrollView as? ClampedScrollView)?.cancelPendingScrollRestore()
                 cv.scroll(to: NSPoint(x: cv.bounds.origin.x, y: targetY))
                 scrollView.reflectScrolledClipView(cv)
                 (scrollView as? ClampedScrollView)?.clampToInsets()
