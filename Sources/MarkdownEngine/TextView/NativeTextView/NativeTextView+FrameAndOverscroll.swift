@@ -391,6 +391,7 @@ extension NativeTextView {
             } else {
                 return false   // already visible (or a spurious verdict, corrected)
             }
+            (scrollView as? ClampedScrollView)?.cancelPendingScrollRestore()
             cv.scroll(to: NSPoint(x: cv.bounds.origin.x, y: targetY))
             scrollView.reflectScrolledClipView(cv)
             (scrollView as? ClampedScrollView)?.clampToInsets()
