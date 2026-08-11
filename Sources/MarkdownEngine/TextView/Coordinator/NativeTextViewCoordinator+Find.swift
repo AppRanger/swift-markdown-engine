@@ -20,7 +20,25 @@ extension NSAttributedString.Key {
     static let findHighlight = NSAttributedString.Key("FindHighlight")
 }
 
+#if DEBUG
+/// Temporary find-navigation trace (stderr — stdout is block-buffered when redirected).
+func engineFindTrace(_ message: String) {
+    FileHandle.standardError.write(Data("FINDTRACE \(message)\n".utf8))
+}
+#endif
+
 extension NativeTextViewCoordinator {
+    #if DEBUG
+    /// Short per-coordinator identity, so a broadcast answered by several live
+    /// editors (`object: nil`) is visible as several different senders.
+    var findTraceID: String {
+        let addr = String(UInt(bitPattern: ObjectIdentifier(self).hashValue) & 0xFFFF, radix: 16)
+        let doc = documentId?.suffix(4).description ?? "nil"
+        let windowed = textView?.window != nil
+        return "\(addr)/doc:\(doc)\(windowed ? "" : "/OFFSCREEN")"
+    }
+    #endif
+
     /// Legacy path: the host computes match ranges and posts them. Kept for compatibility, but
     /// it trusts SOURCE-coordinate ranges, which misalign wherever the displayed text is shorter
     /// than the source (node links etc.). Prefer `handleFindQuery`.
@@ -38,11 +56,19 @@ extension NativeTextViewCoordinator {
     @objc func handleFindQuery(_ notification: Notification) {
         guard let tv = textView,
               let info = notification.userInfo,
-              let query = info["query"] as? String else { return }
+              let query = info["query"] as? String else {
+            #if DEBUG
+            engineFindTrace("query      \(findTraceID) IGNORED (no textView/query)")
+            #endif
+            return
+        }
         let requestedIndex = info["currentIndex"] as? Int ?? 0
 
         let allRanges = findMatches(of: query, in: tv.string as NSString)
         let currentIndex = allRanges.isEmpty ? 0 : min(max(requestedIndex, 0), allRanges.count - 1)
+        #if DEBUG
+        engineFindTrace("query      \(findTraceID) requested=\(requestedIndex) -> current=\(currentIndex) matches=\(allRanges.count) textLen=\((tv.string as NSString).length)")
+        #endif
         renderFindMatches(allRanges, currentIndex: currentIndex)
         postFindResults(count: allRanges.count)
     }
@@ -66,7 +92,12 @@ extension NativeTextViewCoordinator {
 
     private func postFindResults(count: Int) {
         if let resultsName = configuration.services.bus.findResults {
-            NotificationCenter.default.post(name: resultsName, object: nil, userInfo: ["count": count])
+            var userInfo: [String: Any] = ["count": count]
+            #if DEBUG
+            userInfo["who"] = findTraceID
+            engineFindTrace("results    \(findTraceID) posts count=\(count)")
+            #endif
+            NotificationCenter.default.post(name: resultsName, object: nil, userInfo: userInfo)
         }
     }
 
@@ -190,7 +221,12 @@ extension NativeTextViewCoordinator {
         }
 
         // Scroll the current match into view.
-        guard allRanges.indices.contains(currentIndex) else { return }
+        guard allRanges.indices.contains(currentIndex) else {
+            #if DEBUG
+            engineFindTrace("reveal     \(findTraceID) SKIPPED idx=\(currentIndex) out of \(allRanges.count)")
+            #endif
+            return
+        }
         let range = allRanges[currentIndex]
         guard range.location + range.length <= fullRange.length else { return }
         // Scroll via TextKit 2 fragment layout, which works whether or not the
@@ -202,6 +238,9 @@ extension NativeTextViewCoordinator {
         guard let tlm = tv.textLayoutManager,
               let scrollView = tv.enclosingScrollView,
               let matchStart = tlm.textContentManager?.location(tlm.documentRange.location, offsetBy: range.location) else {
+            #if DEBUG
+            engineFindTrace("reveal     \(findTraceID) FALLBACK scrollRangeToVisible idx=\(currentIndex)")
+            #endif
             tv.scrollRangeToVisible(range)
             return
         }
@@ -221,6 +260,16 @@ extension NativeTextViewCoordinator {
                 cv.scroll(to: NSPoint(x: cv.bounds.origin.x, y: targetY))
                 scrollView.reflectScrolledClipView(cv)
                 (scrollView as? ClampedScrollView)?.clampToInsets()
+                #if DEBUG
+                engineFindTrace(String(format: "reveal     %@ idx=%d frag=[%.0f…%.0f] visible=[%.0f…%.0f] target=%.0f landed=%.0f",
+                                       findTraceID, currentIndex, frame.minY, frame.maxY,
+                                       visibleTop, visibleBottom, targetY, cv.bounds.origin.y))
+                #endif
+            } else {
+                #if DEBUG
+                engineFindTrace(String(format: "reveal     %@ idx=%d NO-SCROLL (deemed visible) frag=[%.0f…%.0f] visible=[%.0f…%.0f]",
+                                       findTraceID, currentIndex, frame.minY, frame.maxY, visibleTop, visibleBottom))
+                #endif
             }
             return false
         }
