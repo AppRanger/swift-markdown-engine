@@ -41,6 +41,27 @@ final class ScrollingHeaderController {
     /// Collapse/expand animation duration. Internal so tests can shrink it.
     var animationDuration: TimeInterval = 0.32
 
+    /// Height changes arriving before this instant are applied without animating.
+    ///
+    /// A document switch changes the hosted header's height exactly like a disclosure
+    /// does — the controller sees "the content is now a different height" and nothing
+    /// else — but it must not be revealed: the reader asked for another document, not
+    /// for the header to grow, and animating it drags the whole body text along for
+    /// 0.32s. Measured: two notes whose inspectors differ by 6pt slid the entire
+    /// document on every switch.
+    ///
+    /// A deadline rather than a one-shot flag: if the new document happens to have the
+    /// SAME header height, no change arrives and a one-shot flag would stay armed and
+    /// swallow the next real disclosure. The window is short enough that only the
+    /// switch's own relayout falls inside it (measured 3ms after the reconcile).
+    private var snapHeightChangesUntil: Date?
+
+    /// The embedder is switching documents: apply the next header height change
+    /// straight away instead of revealing it.
+    func snapNextHeightChange() {
+        snapHeightChangesUntil = Date(timeIntervalSinceNow: 0.2)
+    }
+
     /// The reserved top band the body should sit below. When the constant
     /// constraint governs (collapsed / animating) this is its `constant` — stable
     /// against transient mid-layout clip frames; otherwise the live clip height.
@@ -50,6 +71,7 @@ final class ScrollingHeaderController {
         }
         return clipView?.frame.height ?? 0
     }
+
 
     deinit {
         if let clipFrameObserver {
@@ -80,7 +102,50 @@ final class ScrollingHeaderController {
             // header survives (same root structure diffs in place).
             hostingView.rootView = header
         }
+        adoptSwitchedContentHeight(container: container)
         applyExpansion(collapsedHeight: collapsedHeight, expanded: expanded, container: container)
+    }
+
+    /// The embedder just swapped the document. Take the new content's height NOW,
+    /// in the same pass that installed it.
+    ///
+    /// Waiting for `hostHeightChanged` is too late even when it applies the change
+    /// instantly: the host is only re-measured a layout pass later, so the new
+    /// document's text is laid out against the OLD band and then moved. Measured on a
+    /// 6pt difference — reconcile at 72795 and 72809 both still saw the old height, the
+    /// host resized at 72812, the band followed at 72817, and the body text visibly
+    /// stepped. The equality constraint used to make this free, because it resized the
+    /// clip in the same pass as the host.
+    ///
+    /// Nothing to animate here by definition: the reader asked for another document.
+    private func adoptSwitchedContentHeight(container: NativeTextViewContainer) {
+        guard let until = snapHeightChangesUntil, Date() < until,
+              lastExpanded == true,
+              let host = hostingView,
+              let constantC = constantConstraint, constantC.isActive else { return }
+
+        host.invalidateIntrinsicContentSize()
+        host.layoutSubtreeIfNeeded()
+        let target = host.fittingSize.height
+        guard target > 0 else { return }
+
+        if abs(target - constantC.constant) > 0.5 {
+            animationToken += 1
+            settledToken = animationToken
+            animationTargetHeight = nil
+            constantC.constant = target
+        }
+        // Gated on the CLIP, not the constant. The host observer usually sets the
+        // constant a few ms before this runs, so a constant-based guard returned early
+        // and left the clip — which is what `headerHeight` and therefore the body's
+        // origin are read from — trailing by 42ms on every switch. Small deltas hide
+        // that; a note with many tags against one with none would not.
+        guard let clip = clipView, abs(clip.frame.height - constantC.constant) > 0.5 else { return }
+
+        // Resolve in THIS pass, so the band is right before the new document paints.
+        // Legal here (unlike inside the frame observers): reconcile runs from
+        // updateNSView, not from within a layout pass.
+        container.layoutSubtreeIfNeeded()
     }
 
     func remove(from container: NativeTextViewContainer?) {
@@ -249,19 +314,28 @@ final class ScrollingHeaderController {
         // header via `headerExpanded` instead of by emptying its content.
         guard target > 0, abs(target - pending) > 0.5 else { return }
 
-        // A live window resize reflows the inspector continuously, and an offscreen
-        // container is still settling its first layout — neither is a disclosure, so
-        // track those directly instead of animating them. Still through the animator
-        // at zero duration: a plain property set would leave an animation already in
-        // flight ticking toward its stale target underneath.
-        guard !container.inLiveResize, container.window != nil else {
+        // A live window resize reflows the inspector continuously, an offscreen
+        // container is still settling its first layout, and a document switch is the
+        // reader asking for other content — none of the three is a disclosure, so track
+        // those directly instead of animating them. Still through the animator at zero
+        // duration: a plain property set would leave an animation already in flight
+        // ticking toward its stale target underneath.
+        let isDocumentSwitch = (snapHeightChangesUntil.map { Date() < $0 } ?? false)
+        guard !container.inLiveResize, container.window != nil, !isDocumentSwitch else {
             animationToken += 1
             settledToken = animationToken
             animationTargetHeight = nil
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0
-                constantC.animator().constant = target
-            }
+            // Assigned DIRECTLY, not through the animator. Even at zero duration the
+            // animator defers the model value to a later transaction — measured 57ms,
+            // which on a document switch reads as the body text sitting still and then
+            // jumping. The token is advanced so a completion from an animation that was
+            // in flight cannot settle on top of this; that animation's remaining frames
+            // are a rare, brief tail, which is the cheaper trade against a visible
+            // delay on every single switch.
+            animationToken += 1
+            settledToken = animationToken
+            animationTargetHeight = nil
+            constantC.constant = target
             return
         }
         animate(to: target, expandedAfter: true, container: container)

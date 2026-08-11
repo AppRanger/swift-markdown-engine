@@ -737,6 +737,13 @@ private extension NativeTextViewWrapper {
         }
         let controller = coord.headerController ?? ScrollingHeaderController()
         coord.headerController = controller
+        // A document switch re-lays the header out at the new document's height a few
+        // milliseconds later. That is not a disclosure and must not be revealed — see
+        // `snapNextHeightChange`. Read before `updateNSView` advances the coordinator's
+        // `documentId`, so this is the switch's own pass.
+        if coord.documentId != documentId {
+            controller.snapNextHeightChange()
+        }
         controller.reconcile(
             header: header,
             collapsedHeight: headerCollapsedHeight,
