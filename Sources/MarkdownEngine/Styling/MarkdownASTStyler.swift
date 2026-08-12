@@ -279,8 +279,18 @@ enum MarkdownASTStyler {
             }
             contiguousEnd = NSMaxRange(block.range)
             switch block {
-            case .list(_, let items):
+            case .list(let listRange, let items):
+                // A scoped node carries only the items the scope reached, so the
+                // hole check has to bound BOTH ends of the item run against the
+                // block, not just the space between two materialized items: seeded
+                // with the block's start here, closed against its end below.
+                var previousItemEnd: Int? = listRange.location
                 for item in items {
+                    if let previousItemEnd,
+                       item.range.location > previousItemEnd {
+                        counters = [:]
+                        needsSeed = true
+                    }
                     if item.ordered, let literal = item.number {
                         if needsSeed {
                             counters = seedOrderedCounters(above: item.marker.location, in: ns)
@@ -293,6 +303,16 @@ enum MarkdownASTStyler {
                         counters[item.indent] = nil
                     }
                     for key in counters.keys where key > item.indent { counters[key] = nil }
+                    previousItemEnd = NSMaxRange(item.range)
+                }
+                // Items the scope dropped from the TAIL are not "already counted".
+                // Leaving contiguousEnd at the block's end hides them, so the next
+                // block sees only the blank separator, reads it as loose-list
+                // spacing, and carries a short count into a fresh run. Ending the
+                // stretch at the last materialized item turns them back into the
+                // content hole they are.
+                if let previousItemEnd, previousItemEnd < NSMaxRange(listRange) {
+                    contiguousEnd = previousItemEnd
                 }
             case .blank:
                 break                     // blank lines keep the count (spacing, not a reset)
@@ -345,17 +365,17 @@ enum MarkdownASTStyler {
         // An ordered item whose displayed number differs from its source digit
         // gets its WHOLE marker overlaid (below); the hanging indent must then
         // measure the DISPLAY marker so wrapped lines align at any digit count.
-        // False while the caret reveals the marker (edit at raw width) and for
-        // tasks (the checkbox branch owns those).
-        let orderedSyntax = NSRange(location: item.marker.location,
-                                    length: item.contentRange.location - item.marker.location)
-        // Also off while the marker is inside a selection: the painter reveals the
-        // raw source digits there, so the slot must revert to raw width (else a
-        // kerned slot leaves a gap/overlap over the raw digits).
+        // Off for tasks (the checkbox branch owns those).
+        //
+        // Neither the caret nor a selection takes the overlay down. Every other
+        // markdown construct reveals its source under one, but an ordered
+        // marker's source digit is the one thing the reader never authored: it
+        // is positional, and a run written `1./1./1.` would flip a number back
+        // to `1.` on a plain click or a ⌘A. The digits stay hidden and the
+        // painter keeps drawing the display number under the selection
+        // highlight, which is sized to the same kerned slot.
         let orderedOverlayActive = item.ordered && item.checkbox == nil && item.number != nil
             && displayNumber != nil && displayNumber != item.number
-            && !MarkdownStyler.caretRevealsOrderedMarker(caret: ctx.caret, syntax: orderedSyntax)
-            && !ctx.selectionIntersects(orderedSyntax)
         // Keep the source punctuation (`.` or `)`) when overlaying, so a paren list stays a paren list.
         let orderedPunct = orderedOverlayActive && item.marker.length > 0
             ? ctx.ns.substring(with: NSRange(location: NSMaxRange(item.marker) - 1, length: 1)) : "."
@@ -417,20 +437,32 @@ enum MarkdownASTStyler {
         } else if orderedOverlayActive, let displayNumber {
             // Hide the ENTIRE source marker (digits + dot) as one unit and paint
             // the whole display marker "N." over it, so the dot travels with the
-            // digits. Kern the slot to the display marker's width (horizontal
-            // only — a scaled font would inflate the marker ascent and push the
-            // content baseline down under the pinned line height); spread across
-            // all marker chars so every glyph advance stays positive even when
-            // the number shrinks (10 → 9).
-            let sourceW = (ctx.ns.substring(with: item.marker) as NSString)
-                .size(withAttributes: [.font: ctx.baseFont]).width
+            // digits.
+            //
+            // Hidden by SIZE, like every other marker this engine hides, not by a
+            // clear colour: NSTextView.selectedTextAttributes carries a
+            // `selectedTextColor`, so it repaints every selected glyph opaque —
+            // a colour-hidden marker comes back under the highlight and collides
+            // with the number painted over it. A shrunken run cannot be
+            // repainted into visibility. The colour stays as a second line of
+            // defence against sub-pixel residue at extreme zoom.
+            //
+            // Kern that near-zero run back out to the display marker's width so
+            // the slot, the hanging indent and the selection highlight all
+            // measure the same thing. Horizontal only — a scaled-UP font would
+            // inflate the marker ascent and push the content baseline down under
+            // the pinned line height.
+            let hiddenW = (ctx.ns.substring(with: item.marker) as NSString)
+                .size(withAttributes: [.font: ctx.inlineMarkerFont]).width
             let displayW = ("\(displayNumber)\(orderedPunct)" as NSString)
                 .size(withAttributes: [.font: ctx.baseFont]).width
             var markerAttrs: [NSAttributedString.Key: Any] = [
-                .orderedMarker: "\(displayNumber)\(orderedPunct)", .foregroundColor: NSColor.clear,
+                .orderedMarker: "\(displayNumber)\(orderedPunct)",
+                .foregroundColor: NSColor.clear,
+                .font: ctx.inlineMarkerFont,
             ]
-            if abs(displayW - sourceW) > 0.01 {
-                markerAttrs[.kern] = (displayW - sourceW) / CGFloat(max(1, item.marker.length))
+            if abs(displayW - hiddenW) > 0.01 {
+                markerAttrs[.kern] = (displayW - hiddenW) / CGFloat(max(1, item.marker.length))
             }
             attrs.append((item.marker, markerAttrs))
         }

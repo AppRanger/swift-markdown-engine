@@ -17,6 +17,79 @@ struct MarkdownASTStylerTests {
     private let base: CGFloat = 14
     private var fontName: String { NSFont.systemFont(ofSize: 14).fontName }
 
+    @MainActor
+    @Test("scoped styling of a continuous list emits only intersecting ranges")
+    func scopedContinuousListEmitsOnlyIntersectingRanges() {
+        _ = NSApplication.shared
+        let text = String(
+            repeating: "- [x] **fast** `native` [link](relative.md)\n",
+            count: 2_000
+        )
+        let ns = text as NSString
+        let target = ns.lineRange(
+            for: ns.range(of: "- [x] **fast**", options: .backwards)
+        )
+
+        let attrs = MarkdownASTStyler.styleAttributes(
+            text: text,
+            fontName: fontName,
+            fontSize: base,
+            scopedRanges: [target]
+        )
+
+        #expect(!attrs.isEmpty)
+        #expect(attrs.allSatisfy {
+            NSIntersectionRange($0.range, target).length > 0
+        })
+    }
+
+    @MainActor
+    @Test("scoped list styling matches full effective attribute values")
+    func scopedListMatchesFullEffectiveAttributeValues() {
+        _ = NSApplication.shared
+        let text = "- plain *one*\n- [x] **done** `code`\n- [ ] [link](a.md)\n- final _four_\n"
+        let ns = text as NSString
+        let second = ns.lineRange(for: ns.range(of: "- [x]"))
+        let fourth = ns.lineRange(for: ns.range(of: "- final"))
+        let scope = [fourth, second]
+        let caret = second.location + 3
+        let full = MarkdownASTStyler.styleAttributes(
+            text: text,
+            fontName: fontName,
+            fontSize: base,
+            caretLocation: caret
+        )
+        let scoped = MarkdownASTStyler.styleAttributes(
+            text: text,
+            fontName: fontName,
+            fontSize: base,
+            caretLocation: caret,
+            scopedRanges: scope
+        )
+        let fullStorage = NSMutableAttributedString(string: text)
+        let scopedStorage = NSMutableAttributedString(string: text)
+        TextStylingService.applyStyledRanges(
+            full,
+            paragraphs: scope,
+            baseAttributes: [:],
+            to: fullStorage
+        )
+        TextStylingService.applyStyledRanges(
+            scoped,
+            paragraphs: scope,
+            baseAttributes: [:],
+            to: scopedStorage
+        )
+
+        for range in scope {
+            #expect(
+                fullStorage.attributedSubstring(from: range).isEqual(
+                    to: scopedStorage.attributedSubstring(from: range)
+                )
+            )
+        }
+    }
+
     /// Effective font at `pos`: the last styled range covering it that sets `.font`.
     private func font(in attrs: [StyledRange], at pos: Int) -> NSFont? {
         var result: NSFont?
