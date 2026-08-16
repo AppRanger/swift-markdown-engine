@@ -825,6 +825,9 @@ enum MarkdownASTStyler {
             }
         }
         for marker in markers { attrs.append((marker, [.foregroundColor: ctx.theme.mutedText])) }
+        // The target is syntax, revealed with its brackets and muted like them —
+        // at body color it is louder than the label it belongs to.
+        if isActive { attrs.append((urlRange, [.foregroundColor: ctx.theme.mutedText])) }
         styleInlines(children, font: font, ctx: ctx, into: &attrs)
     }
 
