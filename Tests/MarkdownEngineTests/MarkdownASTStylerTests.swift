@@ -192,6 +192,22 @@ struct MarkdownASTStylerTests {
         })
     }
 
+    @Test("a revealed link target is muted like its brackets")
+    func activeLinkTargetIsMuted() {
+        //          0123456789012345678901
+        let attrs = MarkdownASTStyler.styleAttributes(
+            text: "see [Nodes](nodes.app) now",
+            fontName: fontName,
+            fontSize: base,
+            caretLocation: 6
+        )
+        let muted = MarkdownEditorTheme.default.mutedText
+
+        #expect(color(in: attrs, at: 13) == muted)   // inside `nodes.app`
+        #expect(color(in: attrs, at: 11) == muted)   // the `(` beside it
+        #expect(color(in: attrs, at: 5) != muted)    // the label keeps the link ink
+    }
+
     /// Effective color at `pos`: the last styled range covering it that sets `.foregroundColor`.
     private func color(in attrs: [StyledRange], at pos: Int) -> NSColor? {
         var result: NSColor?
