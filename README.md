@@ -25,8 +25,8 @@ checkboxes.
 ## Features
 
 - **Live Markdown styling** — bold, italic, headings, lists, blockquotes, GFM tables, code, links, task checkboxes, horizontal rules
-- **Extensions** — opt-in constructs beyond CommonMark (`==highlight==`, `~~strikethrough~~`, …); add your own via [`MarkdownExtension`](#extensions)
-- **Directives** — opt-in inline commands with typed arguments (`@font(size: 18){text}`); add your own via [`MarkdownDirective`](#directives)
+- **Extensions** — opt-in constructs defined by a *delimiter pair* (`==highlight==`, `~~strikethrough~~`, …); add your own via [`MarkdownExtension`](#extensions)
+- **Directives** — opt-in constructs defined by a *name and typed arguments*, for what a delimiter pair can't express (`@font(size: 18){text}`); add your own via [`MarkdownDirective`](#directives)
 - **Wiki-style linking** with two-form storage / display roundtripping
   (`[[Name|<id>]]` ↔ `[[Name]]`)
 - **Image embeds** — both `![[Name]]` (Obsidian-style, embedder supplies the                           
@@ -279,8 +279,11 @@ with `readingWidth`; an optional `placeholder:` shows ghost text while empty;
 
 ### Extensions
 
-The core engine parses pure markdown. Extra constructs like `==highlight==`,
-`~~strikethrough~~`, and `::: … :::` container blocks are opt-in extensions:
+An extension is **a pair of delimiters** plus how to style what sits between
+them — that is the whole shape, and what distinguishes it from a
+[directive](#directives). The core engine parses pure markdown; constructs like
+`==highlight==`, `~~strikethrough~~`, and `::: … :::` container blocks are
+opt-in extensions:
 
 ```swift
 var config = MarkdownEditorConfiguration()
