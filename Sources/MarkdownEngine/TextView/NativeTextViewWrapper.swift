@@ -55,6 +55,9 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
     /// Push a replacement into the editor by setting this to a non-nil value;
     /// the engine applies it on the next update and then clears the binding.
     @Binding public var pendingInlineReplacement: InlineReplacementRequest?
+    /// Set to grow a table; the engine clears it once applied. A binding, not
+    /// a bus post, because a table range only means something in one document.
+    @Binding public var pendingTableEdit: TableEditRequest?
     /// The full editor configuration (theme + services + style toggles). Engine
     /// embedders construct this themselves and pass it in; the wrapper does
     /// not read UserDefaults or know about app-specific colors/services.
@@ -99,6 +102,10 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
     /// Fires when the set of visible code blocks changes, so embedders can
     /// overlay copy buttons (see ``CodeBlockButton``).
     public var onCodeBlockSelectionChange: (([CodeBlockSelection]) -> Void)?
+    /// Called with the on-screen rendered tables whenever their geometry can
+    /// have changed, so a host can overlay row/column affordances. Tables the
+    /// caret is inside are omitted — they show raw source, not a picture.
+    public var onTableGeometryChange: (([TableBlockGeometry]) -> Void)?
     /// Fires after the user toggles any of the three spell/grammar/auto-correction
     /// menu items. Embedders persist the policy and pass it back via
     /// ``MarkdownEditorConfiguration/spellChecking`` on next launch.
@@ -145,6 +152,7 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         text: Binding<String>,
         isWikiLinkActive: Binding<Bool> = .constant(false),
         pendingInlineReplacement: Binding<InlineReplacementRequest?> = .constant(nil),
+        pendingTableEdit: Binding<TableEditRequest?> = .constant(nil),
         configuration: MarkdownEditorConfiguration = .default,
         fontName: String = "SF Pro",
         fontSize: CGFloat = 16,
@@ -158,6 +166,7 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         onInlineSelectionChange: ((InlineSelectionState?) -> Void)? = nil,
         onInlinePreviewKey: ((InlinePreviewKey) -> Bool)? = nil,
         onCodeBlockSelectionChange: (([CodeBlockSelection]) -> Void)? = nil,
+        onTableGeometryChange: (([TableBlockGeometry]) -> Void)? = nil,
         onSpellCheckingPolicyChanged: ((SpellCheckingPolicy) -> Void)? = nil,
         placeholder: NSAttributedString? = nil,
         header: AnyView? = nil,
@@ -171,6 +180,7 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         self._text = text
         self._isWikiLinkActive = isWikiLinkActive
         self._pendingInlineReplacement = pendingInlineReplacement
+        self._pendingTableEdit = pendingTableEdit
         self.configuration = configuration
         self.fontName = fontName
         self.fontSize = fontSize
@@ -184,6 +194,7 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         self.onInlineSelectionChange = onInlineSelectionChange
         self.onInlinePreviewKey = onInlinePreviewKey
         self.onCodeBlockSelectionChange = onCodeBlockSelectionChange
+        self.onTableGeometryChange = onTableGeometryChange
         self.onSpellCheckingPolicyChanged = onSpellCheckingPolicyChanged
         self.placeholder = placeholder
         self.header = header
@@ -334,6 +345,7 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         context.coordinator.onInlineSelectionChange = onInlineSelectionChange
         context.coordinator.onInlinePreviewKey = onInlinePreviewKey
         context.coordinator.onCodeBlockSelectionChange = onCodeBlockSelectionChange
+        context.coordinator.onTableGeometryChange = onTableGeometryChange
 
         textView.recalcOverscroll(for: scrollView)
         textView.setPlaceholder(placeholder)
@@ -357,6 +369,7 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
                 }
                 context.coordinator.didEnsureLayoutForCurrentDocument = false
                 context.coordinator.updateCodeBlockSelection(textView: textView)
+                context.coordinator.updateTableGeometry(textView: textView)
             }
             // Only react with overscroll recalc when the viewport itself resizes
             // (window resize). Without this guard, TextKit-induced frame changes echo
@@ -389,6 +402,7 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
             scrollView.clampToInsets()
             context.coordinator.refreshActiveLinkCaretRect()
             context.coordinator.updateCodeBlockSelection(textView: textView)
+            context.coordinator.updateTableGeometry(textView: textView)
         }
         reconcileHeader(textView: textView, context: context)
         return scrollView
@@ -568,6 +582,18 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
             }
             return
         }
+        if let pendingTableEdit {
+            if pendingTableEdit.documentId == documentId,
+               context.coordinator.lastAppliedTableEditID != pendingTableEdit.id {
+                context.coordinator.applyTableEdit(pendingTableEdit, to: textView)
+            }
+            DispatchQueue.main.async {
+                if self.pendingTableEdit?.id == pendingTableEdit.id {
+                    self.pendingTableEdit = nil
+                }
+            }
+            return
+        }
         if context.coordinator.didInitialFormatting
             && context.coordinator.lastSyncedText == text
             && !fontChanged {
@@ -610,6 +636,10 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
             context.coordinator.resetImageEmbedState()
             // Drop old document's wide-table overlays synchronously.
             textView.removeAllWideTableOverlays()
+            // Stale rects would otherwise be published against the incoming
+            // document until its first restyle lands.
+            context.coordinator.lastTableGeoKey = nil
+            context.coordinator.onTableGeometryChange?([])
             // Park at top during the rebuild; the new document's own saved offset
             // (if any) is restored after its height is known (see below).
             nsView.contentView.scroll(to: NSPoint(x: 0, y: -nsView.contentInsets.top))
@@ -686,6 +716,7 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         textView.refreshPlaceholderVisibility()
         DispatchQueue.main.async {
             context.coordinator.updateCodeBlockSelection(textView: textView)
+            context.coordinator.updateTableGeometry(textView: textView)
         }
 
         context.coordinator.onCaretRectChange = onCaretRectChange
@@ -694,6 +725,7 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         context.coordinator.onInlineSelectionChange = onInlineSelectionChange
         context.coordinator.onInlinePreviewKey = onInlinePreviewKey
         context.coordinator.onCodeBlockSelectionChange = onCodeBlockSelectionChange
+        context.coordinator.onTableGeometryChange = onTableGeometryChange
         context.coordinator.didInitialFormatting = true
     }
 
@@ -717,6 +749,7 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         coordinator.lastImageFingerprint = configuration.services.images.fingerprint()
         coordinator.lastWikiFingerprint = configuration.services.wikiLinks.fingerprint()
         coordinator.onCodeBlockSelectionChange = onCodeBlockSelectionChange
+        coordinator.onTableGeometryChange = onTableGeometryChange
         coordinator.onInlinePreviewKey = onInlinePreviewKey
         coordinator.userPrefersContinuousSpellChecking = configuration.spellChecking.continuousSpellChecking
         coordinator.userPrefersGrammarChecking = configuration.spellChecking.grammarChecking

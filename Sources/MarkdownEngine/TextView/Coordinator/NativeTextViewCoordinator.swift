@@ -85,6 +85,7 @@ public final class NativeTextViewCoordinator: NSObject, NSTextViewDelegate {
     var onInlineSelectionChange: ((InlineSelectionState?) -> Void)?
     var onInlinePreviewKey: ((InlinePreviewKey) -> Bool)?
     var onCodeBlockSelectionChange: (([CodeBlockSelection]) -> Void)?
+    var onTableGeometryChange: (([TableBlockGeometry]) -> Void)?
     var didInitialFormatting: Bool = false
     /// One-shot guard so `updateCodeBlockSelection` only forces a full-document layout once per document.
     var didEnsureLayoutForCurrentDocument: Bool = false
@@ -107,6 +108,7 @@ public final class NativeTextViewCoordinator: NSObject, NSTextViewDelegate {
     var wtUndoneDuringSession: Bool = false
     var wtPostUndoSnapshot: String?
     var lastAppliedInlineReplacementID: UUID?
+    var lastAppliedTableEditID: UUID?
     var activeTokenIndices: Set<Int> = []
     var previousActiveTokenIndices: Set<Int> = []
     var wikiLinkMetadata: [WikiLinkService.RangeKey: WikiLinkService.LinkMetadata] = [:]
@@ -180,6 +182,8 @@ public final class NativeTextViewCoordinator: NSObject, NSTextViewDelegate {
     /// (parse version, scroll, width, active-code set) means identical output,
     /// so the second per-keystroke invocation can skip the geometry work.
     var lastCodeSelKey: (UInt64, CGFloat, CGFloat, Set<Int>)?
+    /// Same dedupe contract as `lastCodeSelKey`, for the table-geometry publish.
+    var lastTableGeoKey: (UInt64, CGFloat, CGFloat, Set<Int>)?
     var cachedParsedText: String?
     var cachedParsedDocument: ParsedDocument?
     /// Monotonic edit counter: bumped whenever the text storage can have

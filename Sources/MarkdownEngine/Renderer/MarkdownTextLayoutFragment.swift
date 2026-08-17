@@ -33,6 +33,12 @@ extension NSAttributedString.Key {
     static let scrollableBlockTotalHeight = NSAttributedString.Key("ScrollableBlockTotalHeight")
     /// NSValue(range:) — full multi-line range of a rendered table, used to scope width-change restyles.
     static let scrollableBlockFullRange = NSAttributedString.Key("ScrollableBlockFullRange")
+    /// `TableAnchor` — the rendered table plus its source range, stamped on the
+    /// anchor char. Lets a consumer find every rendered table and its grid by
+    /// scanning one attribute, instead of recomputing the anchor's location and
+    /// drifting from `emitCollapsedAttrs`. Only an INACTIVE table renders, so the
+    /// stamp's presence already means "showing a picture, not raw pipes".
+    static let tableAnchor = NSAttributedString.Key("TableAnchor")
 }
 
 public extension NSAttributedString.Key {

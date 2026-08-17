@@ -360,6 +360,7 @@ extension NativeTextViewCoordinator {
 
         PerfTrace.measure("restyle") { restyleTextView(tv, paragraphCandidates: effectiveParagraphCandidates, tokens: tokens, classified: parsed.classified, blocks: parsed.blocks) }
         PerfTrace.measure("codeSel") { updateCodeBlockSelection(textView: tv, parsed: parsed) }
+        PerfTrace.measure("tableGeo") { updateTableGeometry(textView: tv, parsed: parsed) }
         if wtActive {
             previousActiveTokenIndices = activeTokenIndices
             PerfTrace.end()
@@ -710,6 +711,7 @@ extension NativeTextViewCoordinator {
         // Skip during a pending edit — viewRect is stale until textDidChange's restyle runs; otherwise the overlay flashes to the old Y before settling.
         if !shouldSkipSelectionRestyle {
             updateCodeBlockSelection(textView: tv, parsed: parsed)
+            updateTableGeometry(textView: tv, parsed: parsed)
         }
     }
 

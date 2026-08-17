@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `NativeTextViewWrapper.onTableGeometryChange` reports where the on-screen
+  rendered tables are, so embedders can overlay their own row/column
+  affordances. Tables the caret is inside are omitted — they show raw source
+  rather than a picture, so there is no rendered box to attach anything to. The
+  engine reports geometry and performs the edit; it draws no chrome.
+- `NativeTextViewWrapper.pendingTableEdit` grows a table by appending a row or a
+  column. A binding rather than a bus request because a table's range is an
+  absolute offset that means something in exactly one document, while every bus
+  post reaches every live coordinator. Both operations are insert-only, so a
+  `[[Name|UUID]]` in an untouched cell keeps its identity, and each arrives as a
+  single undo step.
 - `NativeTextViewWrapper.onTextMutation` reports exact, completed native edits
   for embedders that maintain their own source authority or mirror edits into
   another presentation.

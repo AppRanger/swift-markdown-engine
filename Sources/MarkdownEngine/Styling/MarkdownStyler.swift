@@ -300,6 +300,7 @@ extension MarkdownStyler {
         alignment: NSTextAlignment,
         mode: RenderedStandaloneBlockMode,
         restyleOnWidthChange: Bool = false,
+        extraAnchorAttrs: [NSAttributedString.Key: Any] = [:],
         ctx: StylingContext,
         attrs: inout [StyledRange]
     ) -> Bool {
@@ -309,9 +310,10 @@ extension MarkdownStyler {
         let baseLineHeight = layoutBridgeDefaultLineHeight(for: ctx.baseFont, using: ctx.layoutBridge)
         para.paragraphSpacingBefore = max(para.paragraphSpacingBefore, paragraphSpacingBefore)
         para.alignment = alignment
-        let widthChangeAnchorAttrs: [NSAttributedString.Key: Any] = restyleOnWidthChange
+        var widthChangeAnchorAttrs: [NSAttributedString.Key: Any] = restyleOnWidthChange
             ? [.scrollableBlockFullRange: NSValue(range: paraRange)]
             : [:]
+        widthChangeAnchorAttrs.merge(extraAnchorAttrs) { _, new in new }
 
         switch mode {
         case .collapsedSource(let markerTexts):

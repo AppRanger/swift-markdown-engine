@@ -93,3 +93,46 @@ public struct InlineReplacementRequest: Sendable {
         self.isImageEmbedMode = isImageEmbedMode
     }
 }
+
+/// Structural change to a table's source.
+public enum TableEditOperation: Sendable, Equatable {
+    /// Append an empty row below the table's last row.
+    case appendRow
+    /// Append an empty column on the table's right.
+    case appendColumn
+}
+
+/// Request to grow a table, delivered through
+/// ``NativeTextViewWrapper/pendingTableEdit``.
+///
+/// A binding rather than a notification on purpose: the editor bus posts with
+/// `object: nil`, so every live coordinator in the process receives every post.
+/// The existing bus requests get away with that because they act on the
+/// *selection*, which is per-editor. A table's range is an absolute offset that
+/// means something in exactly one document — broadcasting it would let a
+/// background editor rewrite itself at that offset.
+public struct TableEditRequest: Sendable, Equatable {
+    /// Stable identifier so the engine can detect already-applied requests
+    /// across SwiftUI re-renders.
+    public let id: UUID
+    /// Document the edit targets. Ignored if it doesn't match the editor's
+    /// current `documentId` (prevents cross-document writes).
+    public let documentId: String
+    /// Source range of the table to grow, as published in
+    /// ``TableBlockGeometry/sourceRange``. Ignored unless it still exactly
+    /// matches a rendered table, so a stale request cannot corrupt prose.
+    public let tableRange: NSRange
+    public let operation: TableEditOperation
+
+    public init(
+        id: UUID = UUID(),
+        documentId: String,
+        tableRange: NSRange,
+        operation: TableEditOperation
+    ) {
+        self.id = id
+        self.documentId = documentId
+        self.tableRange = tableRange
+        self.operation = operation
+    }
+}
