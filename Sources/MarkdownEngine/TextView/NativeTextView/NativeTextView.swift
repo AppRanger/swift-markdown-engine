@@ -51,6 +51,7 @@ final class NativeTextView: NSTextView {
 
     // MARK: Caret-workaround state
     var caretIndicatorObservation: NSKeyValueObservation?
+    var caretVisibilityObservation: NSKeyValueObservation?
     weak var observedCaretIndicator: NSView?
     var isApplyingCaretShift: Bool = false
 
@@ -62,7 +63,8 @@ final class NativeTextView: NSTextView {
     /// was aimed. That is the "first click always goes to the top-left cell".
     /// The point is kept until the restyle that click triggers makes the table
     /// live, and then re-asked once.
-    var pendingLiveTableClick: CGPoint?
+    var pendingLiveTableClick: (point: CGPoint, signature: Int)?
+
 
     /// A cell the user clicked that the row's source does not contain, as the
     /// row's line and the table it belongs to. Recorded by the hit test, acted
@@ -124,5 +126,8 @@ final class NativeTextView: NSTextView {
         coord.restyleParagraphs([paragraph], in: self)
     }
 
-    deinit { caretIndicatorObservation?.invalidate() }
+    deinit {
+        caretIndicatorObservation?.invalidate()
+        caretVisibilityObservation?.invalidate()
+    }
 }

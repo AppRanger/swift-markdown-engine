@@ -45,6 +45,7 @@ final class LiveTableRowRender {
         cells: [LiveTableCellLayout],
         lineRange: NSRange,
         tableRange: NSRange,
+        rowHeight: CGFloat,
         borderColor: NSColor,
         headerFill: NSColor
     ) {
@@ -53,6 +54,7 @@ final class LiveTableRowRender {
         self.cells = cells
         self.lineRange = lineRange
         self.tableRange = tableRange
+        self.rowHeight = rowHeight
         self.borderColor = borderColor
         self.headerFill = headerFill
     }
@@ -61,9 +63,24 @@ final class LiveTableRowRender {
     var isHeader: Bool { geometryRow == 0 }
 
     /// Height this row occupies, including its padding and the border below it.
-    var rowHeight: CGFloat {
+    ///
+    /// Usually the measured pitch, but NOT always: revealing the raw syntax of
+    /// the construct the caret is in makes that one cell wider, so it can wrap
+    /// onto a line the picture never measured. The row has to grow with it or
+    /// the grid draws over its neighbour.
+    let rowHeight: CGFloat
+
+    /// The pitch a row needs for `cells`, or the geometry's own when they fit.
+    static func height(
+        for cells: [LiveTableCellLayout], geometryRow: Int?, geometry: TableGeometry
+    ) -> CGFloat {
         guard let row = geometryRow else { return geometry.borderWidth }
-        return geometry.rowPitch(row) ?? geometry.borderWidth
+        let measured = geometry.rowPitch(row) ?? geometry.borderWidth
+        guard let tallest = cells.map(\.height).max() else { return measured }
+        // The picture's own arithmetic. The header's `textTopInset` is not an
+        // extra term: it only moves the text down into room the top border
+        // already occupies in the measured pitch.
+        return max(measured, tallest + 2 * geometry.cellVPadding + geometry.borderWidth)
     }
 
     /// Extra space above the header's text.
@@ -100,18 +117,27 @@ final class LiveTableRowRender {
             // Fill below the top border, not under it, or the border reads
             // darker than the bitmap's.
             headerFill.setFill()
-            CGRect(x: origin.x, y: origin.y + border,
-                   width: width, height: max(0, height - border)).fill()
+            let fillTop = pixelAlign(origin.y + border)
+            CGRect(x: origin.x, y: fillTop,
+                   width: width, height: max(0, pixelAlign(origin.y + height) - fillTop)).fill()
             borderColor.setFill()
             CGRect(x: origin.x, y: pixelAlign(origin.y), width: width, height: border).fill()
         }
 
         borderColor.setFill()
+        // Snapped to the pixel grid at BOTH ends, not just in x. Each row draws
+        // its own verticals, so row N's bottom and row N+1's top meet; on a
+        // fractional boundary each contributes partial coverage and the two
+        // composite to 0.44 of the colour where one continuous bar gives 0.50 —
+        // a lighter nick at every row line, which is how the drawn grid differed
+        // from the picture.
+        let top = pixelAlign(origin.y)
+        let bottom = pixelAlign(origin.y + height)
         // columnLeft's last entry IS the table's right edge, so this covers both
         // outer verticals and every separator between them.
         for edge in geometry.columnLeft {
-            CGRect(x: pixelAlign(origin.x + edge - border), y: origin.y,
-                   width: border, height: height).fill()
+            CGRect(x: pixelAlign(origin.x + edge - border), y: top,
+                   width: border, height: bottom - top).fill()
         }
         // One rule per row, once. The header's is the delimiter line.
         if !isHeader {

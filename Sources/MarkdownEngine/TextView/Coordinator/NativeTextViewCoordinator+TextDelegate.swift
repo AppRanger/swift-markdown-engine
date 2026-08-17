@@ -550,6 +550,17 @@ extension NativeTextViewCoordinator {
             // to repaint.
             return false
         }
+        // A live table reveals the raw markup of the construct the caret is in,
+        // exactly as prose does — but the WHOLE table is one token, so
+        // `tokensChanged` cannot see the caret move from one cell to the next,
+        // and that move is the only thing deciding which cell opens. Without
+        // this signal the grid kept whatever styling the caret had when it first
+        // entered the table, which is where AppKit drops it: the table's start.
+        let caretMovedWithinTable = previousCaretLocation.map { prev in
+            prev != selLoc && parsed.classified.table.contains {
+                NSLocationInRange(selLoc, $0.token.range) || NSLocationInRange(prev, $0.token.range)
+            }
+        } ?? false
         let selectionSpanChanged = previousSelectedRange != selRange
             && ((previousSelectedRange?.length ?? 0) > 0 || selRange.length > 0)
             && (paragraphsTouchRevealSyntax(previousSelectedRange) || paragraphsTouchRevealSyntax(selRange))
@@ -560,7 +571,7 @@ extension NativeTextViewCoordinator {
         } else if isDragSelecting {
             needsRestyleAfterDrag = true
         } else if tokensChanged || taskSyntaxChanged || hrLineChanged || bulletSyntaxChanged
-                    || selectionSpanChanged || needsRestyleAfterDrag {
+                    || caretMovedWithinTable || selectionSpanChanged || needsRestyleAfterDrag {
             needsRestyleAfterDrag = false
             // Candidates are built ONLY when a restyle actually runs — this
             // used to happen unconditionally on every selection change,

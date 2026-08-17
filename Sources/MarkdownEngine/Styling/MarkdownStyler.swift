@@ -45,6 +45,10 @@ extension MarkdownStyler {
         let latexMarkerFont: NSFont
         let configuration: MarkdownEditorConfiguration
         let wikiLinkIDProvider: (NSRange) -> String?
+        /// Caret offset, or -1 when there is none. A live table reveals the raw
+        /// syntax of the construct the caret is in, the same way prose does, and
+        /// that is the only thing here that needs to know.
+        var caretLocation: Int = -1
         /// Union bounds of the restyle's paragraph scope; nil = whole document
         /// (initial load). Attribute application clips per paragraph anyway,
         /// so the NSImage passes can skip tokens wholly outside these bounds
@@ -238,6 +242,7 @@ enum MarkdownStyler {
                 ?? NSFont.systemFont(ofSize: hiddenMarkerSize),
             configuration: configuration,
             wikiLinkIDProvider: wikiLinkIDProvider,
+            caretLocation: caretLocation,
             scopeBounds: scopeBounds,
             classified: classified
         )

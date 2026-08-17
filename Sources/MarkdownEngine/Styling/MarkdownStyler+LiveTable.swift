@@ -117,17 +117,30 @@ extension MarkdownStyler {
 
     /// Everything a styled cell depends on, as one string. Shared with the
     /// line-break cache so both are keyed on the same identity.
-    static func liveCellCacheKey(raw: String, header: Bool, ctx: StylingContext) -> String {
-        "\(header ? 1 : 0)|\(ctx.baseFont.fontName)|\(ctx.baseFont.pointSize)|"
+    /// - Parameter caret: caret offset RELATIVE to the cell, or -1 when the
+    ///   caret is elsewhere. Part of the key because it decides which markers are
+    ///   revealed, and a revealed cell is a different string — and a different
+    ///   width — from a hidden one.
+    static func liveCellCacheKey(raw: String, header: Bool, caret: Int, ctx: StylingContext) -> String {
+        "\(header ? 1 : 0)|\(caret)|\(ctx.baseFont.fontName)|\(ctx.baseFont.pointSize)|"
             + "\(ctx.configuration.extensionRegistry.fingerprint)|\(raw)"
+    }
+
+    /// Whether the caret is inside `range`, matching prose exactly
+    /// (`MarkdownASTStyler.Ctx.isActive`): inside, or resting on the closing
+    /// edge — but not across a line break, which a table cell cannot contain.
+    private static func revealsMarkers(_ range: NSRange, caret: Int) -> Bool {
+        if NSLocationInRange(caret, range) { return true }
+        return range.length > 0 && caret == NSMaxRange(range)
     }
 
     static func liveCellString(
         raw: String,
         header: Bool,
+        caret: Int,
         ctx: StylingContext
     ) -> NSAttributedString {
-        let cacheKey = liveCellCacheKey(raw: raw, header: header, ctx: ctx) as NSString
+        let cacheKey = liveCellCacheKey(raw: raw, header: header, caret: caret, ctx: ctx) as NSString
         if let cached = liveCellCache.object(forKey: cacheKey) { return cached }
 
         let baseFont = ctx.baseFont
@@ -176,13 +189,16 @@ extension MarkdownStyler {
             }
         }
 
-        func walk(_ nodes: [InlineNode]) {
+        // An active construct reveals its whole subtree, so `**a `b` c**` opens
+        // as one piece rather than leaving the inner backticks hidden.
+        func walk(_ nodes: [InlineNode], forceReveal: Bool = false) {
             for node in nodes {
                 switch node {
                 case .text:
                     break
                 case .emphasis(let kind, let range, let markers, let children):
-                    walk(children)
+                    let reveal = forceReveal || revealsMarkers(range, caret: caret)
+                    walk(children, forceReveal: reveal)
                     // Trait first, then hide the markers — addTrait skips runs
                     // already shrunk, so the order keeps them hidden.
                     switch kind {
@@ -192,21 +208,26 @@ extension MarkdownStyler {
                         addTrait(.bold, in: range)
                         addTrait(.italic, in: range)
                     }
-                    markers.forEach(shrink)
+                    if !reveal { markers.forEach(shrink) }
                 case .code(let range, let content):
                     out.addAttributes([
                         .font: NSFont.monospacedSystemFont(ofSize: baseFont.pointSize, weight: .regular),
                         .backgroundColor: ctx.codeBackgroundColor,
                     ], range: content)
                     // The backticks on either side of the content.
-                    shrink(NSRange(location: range.location, length: content.location - range.location))
-                    shrink(NSRange(location: NSMaxRange(content),
-                                   length: NSMaxRange(range) - NSMaxRange(content)))
-                case .escape(_, _, let marker):
-                    shrink(marker)
+                    if !(forceReveal || revealsMarkers(range, caret: caret)) {
+                        shrink(NSRange(location: range.location, length: content.location - range.location))
+                        shrink(NSRange(location: NSMaxRange(content),
+                                       length: NSMaxRange(range) - NSMaxRange(content)))
+                    }
+                case .escape(let range, _, let marker):
+                    if !(forceReveal || revealsMarkers(range, caret: caret)) { shrink(marker) }
                 case .ext(let ext):
-                    walk(ext.children)
-                    ext.markers.forEach(shrink)
+                    let extReveal = forceReveal || revealsMarkers(ext.range, caret: caret)
+                    walk(ext.children, forceReveal: extReveal)
+                    if !extReveal {
+                        ext.markers.forEach(shrink)
+                    }
                 case .link, .wikiLink, .image, .imageEmbed, .inlineLatex:
                     // Rendered raw by the bitmap; leave raw so the widths agree.
                     break
@@ -257,6 +278,12 @@ extension MarkdownStyler {
         attrs.append((tableRange, [
             .font: hiddenFont,
             .foregroundColor: NSColor.clear,
+            // Cleared, not merely unset: attributes are applied over the
+            // previous pass, so the picture's `.latexIsBlock` survives into the
+            // live form. `applyBlockImageCaretPolicy` reads it and hides the
+            // caret — inside a table you can type in, which is where the caret
+            // once disappeared entirely.
+            .latexIsBlock: false,
         ]))
 
         let lastRowIndex = rows.map(\.index).max() ?? 0
@@ -274,7 +301,12 @@ extension MarkdownStyler {
                     // click resolves back to a real document offset.
                     let raw = ns.substring(with: cell)
                     let isHeader = geometryRow == 0
-                    let text = liveCellString(raw: raw, header: isHeader, ctx: ctx)
+                    // -1 for every cell the caret is not in, so cells with the
+                    // same text keep sharing one cache entry.
+                    let caretLocal = revealsMarkers(cell, caret: ctx.caretLocation)
+                        ? ctx.caretLocation - cell.location
+                        : -1
+                    let text = liveCellString(raw: raw, header: isHeader, caret: caretLocal, ctx: ctx)
                     cells.append(LiveTableCellLayout.make(
                         attributed: text,
                         sourceLocation: cell.location,
@@ -282,7 +314,7 @@ extension MarkdownStyler {
                         lineHeight: layout.singleLineHeight,
                         caretRange: column < row.spans.count ? row.spans[column] : nil,
                         font: ctx.baseFont,
-                        cacheKey: liveCellCacheKey(raw: raw, header: isHeader, ctx: ctx)
+                        cacheKey: liveCellCacheKey(raw: raw, header: isHeader, caret: caretLocal, ctx: ctx)
                     ))
                 }
             }
@@ -293,6 +325,9 @@ extension MarkdownStyler {
                 cells: cells,
                 lineRange: row.line,
                 tableRange: tableRange,
+                rowHeight: LiveTableRowRender.height(
+                    for: cells, geometryRow: geometryRow, geometry: geometry
+                ),
                 borderColor: borderColor,
                 headerFill: headerFill
             )

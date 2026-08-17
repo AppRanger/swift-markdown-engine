@@ -486,3 +486,85 @@ struct LiveTableHardBreakCaretTests {
         #expect(layout.hardTerminated == [0])
     }
 }
+
+/// Raw syntax reveals for the construct the caret is in, exactly as it does in
+/// prose. Everywhere else in the cell the markers stay kerned to zero, so the
+/// live string keeps matching the width the picture measured.
+@Suite("Live table marker reveal")
+struct LiveTableMarkerRevealTests {
+
+    private func cells(_ text: String, caret: Int) throws -> [LiveTableCellLayout] {
+        _ = NSApplication.shared
+        let font = NSFont.systemFont(ofSize: 15)
+        var ctx = MarkdownStyler.StylingContext(
+            nsText: text as NSString,
+            tokens: MarkdownTokenizer.parseTokensViaAST(in: text),
+            codeTokens: [], activeTokenIndices: [], baseFont: font, layoutBridge: nil,
+            baseDefaultLineHeight: 18, codeBackgroundColor: .windowBackgroundColor,
+            latexMarkerFont: NSFont.systemFont(ofSize: 0.1),
+            configuration: .default, wikiLinkIDProvider: { _ in nil },
+            caretLocation: caret
+        )
+        ctx.scopeBounds = nil
+        let token = try #require(ctx.tokens.first { $0.kind == .table })
+        let parsed = try #require(MarkdownStyler.parseTableSource(ctx.nsText.substring(with: token.range)))
+        let layout = MarkdownStyler.measureTable(
+            parsed, baseFont: font, theme: ctx.configuration.theme,
+            codeBackgroundColor: ctx.codeBackgroundColor, latex: ctx.services.latex,
+            availableWidth: 650, extensions: ctx.configuration.extensions
+        )
+        var attrs: [StyledRange] = []
+        MarkdownStyler.styleLiveTable(
+            tableRange: token.range, layout: layout,
+            rows: TableCells.rows(in: ctx.nsText, tableRange: token.range),
+            ctx: ctx, attrs: &attrs
+        )
+        return attrs.compactMap { $0.attributes[.liveTableRow] as? LiveTableRowRender }
+            .flatMap(\.cells)
+    }
+
+    /// `| **fett** | b |` — the `**` is at 2…4 and 8…10.
+    private let table = "| a | b |\n|---|---|\n| **fett** | plain |"
+
+    private func markerIsVisible(_ cell: LiveTableCellLayout) throws -> Bool {
+        let font = try #require(cell.attributed.attribute(.font, at: 0, effectiveRange: nil) as? NSFont)
+        return font.pointSize > 1
+    }
+
+    @Test func theCaretRevealsItsOwnConstruct() throws {
+        // Caret inside the bold span.
+        let inside = try cells(table, caret: 30)
+        let cell = try #require(inside.first { $0.attributed.string == "**fett**" })
+        #expect(try markerIsVisible(cell), "the ** must be readable while the caret is in it")
+    }
+
+    @Test func aCaretElsewhereLeavesItHidden() throws {
+        let away = try cells(table, caret: 0)
+        let cell = try #require(away.first { $0.attributed.string == "**fett**" })
+        #expect(try !markerIsVisible(cell), "and hidden everywhere else")
+    }
+
+    /// The revealed cell is wider, so it can wrap onto a line the picture never
+    /// measured. The row has to grow with it or the grid draws over the row below.
+    @Test func aRevealedCellNeverOverflowsItsRow() throws {
+        _ = NSApplication.shared
+        let font = NSFont.systemFont(ofSize: 15)
+        let geometry = TableGeometry(
+            columnCount: 1, rowCount: 1,
+            borderWidth: TableMetrics.borderWidth,
+            cellHPadding: TableMetrics.cellHPadding,
+            cellVPadding: TableMetrics.cellVPadding,
+            columnLeft: [1, 121], rowTop: [1, 32], rowContentHeights: [19],
+            alignments: [.left], totalSize: CGSize(width: 121, height: 32)
+        )
+        let tall = LiveTableCellLayout.make(
+            attributed: NSAttributedString(string: "eins zwei drei vier fünf sechs sieben",
+                                           attributes: [.font: font]),
+            sourceLocation: 0, width: 96, lineHeight: 19, font: font
+        )
+        try #require(tall.lineCount > 1)
+        let height = LiveTableRowRender.height(for: [tall], geometryRow: 0, geometry: geometry)
+        #expect(height >= tall.height + 2 * geometry.cellVPadding)
+        #expect(height > geometry.rowPitch(0) ?? 0, "a taller cell must push the row open")
+    }
+}

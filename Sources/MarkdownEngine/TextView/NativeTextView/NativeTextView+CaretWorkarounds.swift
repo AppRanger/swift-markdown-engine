@@ -13,13 +13,32 @@ import AppKit
 extension NativeTextView {
     override func updateInsertionPointStateAndRestartTimer(_ restartFlag: Bool) {
         super.updateInsertionPointStateAndRestartTimer(restartFlag)
+        // Before the first policy, not only from the deferred tail: on the first
+        // click of a launch the indicator is created by the call above, so a tail
+        // that installs the observation afterwards misses that one caret — which
+        // is why the flash survived exactly one click per app start.
+        observeCaretIndicator()
         applyBlockImageCaretPolicy()
         // Last, so it wins over the two policies above when it applies at all.
         applyLiveTableCaretPolicy()
         probeLiveTableNavigationSurvival()
         DispatchQueue.main.async { [weak self] in
+            // Re-aiming moves the SELECTION, so it must not run inside AppKit's
+            // own selection handling above: the nested change is swallowed, the
+            // restyle it should trigger never happens, and the table keeps being
+            // drawn from the styling done for the caret AppKit had first picked —
+            // which is why a cell's raw syntax stayed hidden after a first click.
+            self?.resolvePendingLiveTableClick()
+            // Cleared unconditionally: the click either found its cell or did
+            // not, and either way the caret must come back this turn.
             self?.createPendingLiveTableCell()
             self?.fixPhantomTrailingCaret()
+            // Re-asked because AppKit REPLACES the insertion indicator when the
+            // caret crosses into a block anchor: the fresh subview comes back
+            // with the default display mode, so whatever was hidden a moment ago
+            // is on screen again. Proven by mode+isHidden both reverting to
+            // their defaults with no policy running in between.
+            self?.applyBlockImageCaretPolicy()
             self?.applyLiveTableCaretPolicy()
         }
     }
@@ -66,14 +85,20 @@ extension NativeTextView {
     /// at. Now that the grid exists, the same point resolves properly. Only ever
     /// applies to a plain caret already inside the live table, so a drag,
     /// a selection, or a click that never entered a table is left alone.
-    private func resolvePendingLiveTableClick() {
-        guard let point = pendingLiveTableClick else { return }
-        let selection = selectedRange()
-        guard selection.length == 0,
-              liveTableCaretRect(forOffset: selection.location) != nil,
-              let hit = liveTableHit(at: point)
-        else { return }
+    func resolvePendingLiveTableClick() {
+        guard let pending = pendingLiveTableClick else { return }
+        // Wait for the restyle the click itself triggered. Judged on WHICH table
+        // is live, not on whether any is: moving the caret from one table to
+        // another leaves the old one's rows stamped for a moment, and "some table
+        // is live" reads that moment as the final answer.
+        guard liveTableSignature != pending.signature else { return }
         pendingLiveTableClick = nil
+
+        let point = pending.point
+        let selection = selectedRange()
+        guard selection.length == 0, let hit = liveTableHit(at: point) else {
+            return
+        }
         guard hit.offset != selection.location else { return }
         setSelectedRange(NSRange(location: hit.offset, length: 0))
     }
@@ -91,7 +116,6 @@ extension NativeTextView {
     /// through the same `isApplyingCaretShift` guard, so our own write does not
     /// re-enter as if AppKit had moved the caret.
     func applyLiveTableCaretPolicy() {
-        resolvePendingLiveTableClick()
         let offset = selectedRange().location
         // Settle which side of a soft wrap this offset means, ONCE per move.
         // This method runs several times per event; recomputing the direction on
@@ -175,9 +199,41 @@ extension NativeTextView {
             }
         }
 
+        // A click waiting to be re-aimed: the caret still stands where AppKit
+        // first put it — the table's first cell — and the re-aim only lands a
+        // run loop turn later, so one frame is drawn with a caret in the
+        // top-left corner. Conditioned on actually being in a cell, not on the
+        // pending click alone: every click in prose leaves one pending too, and
+        // that one is never resolved, which would hide the caret for good.
+        if !hide, pendingLiveTableClick != nil, liveTableCaretIndicatorFrame(width: 1) != nil {
+            hide = true
+        }
+
         for sub in indicators {
             if !hide && resize { resizeIndicatorToLayoutCaret(sub) }
+            // Frame first, THEN visibility. The indicator still carries the
+            // frame AppKit computed for the hidden source line — one table row
+            // tall, 61 to 85pt against a caret's ~20 — and showing it before
+            // the correction lands puts a bar the height of a row on screen.
+            if !hide,
+               let target = liveTableCaretIndicatorFrame(width: max(sub.frame.width, 1)),
+               !target.equalTo(sub.frame) {
+                isApplyingCaretShift = true
+                sub.frame = target
+                isApplyingCaretShift = false
+            }
+            isApplyingCaretShift = true
             if sub.isHidden != hide { sub.isHidden = hide }
+            // `isHidden` alone does not stick: AppKit owns this subview and
+            // re-shows it on its own insertion-point update, which is how a
+            // caret on a block anchor — as tall as the picture, measured 598pt
+            // for a table — got back on screen a frame after being hidden.
+            if let bar = sub as? NSTextInsertionIndicator {
+                bar.displayMode = hide ? .hidden : .automatic
+            }
+            isApplyingCaretShift = false
+            if sub.frame.height > 40 || hide {
+            }
         }
     }
 
@@ -199,18 +255,32 @@ extension NativeTextView {
     }
 
     /// FB22524198: AppKit drops the trailing-`\n` caret onto the previous line's top — snap it to `lastLineMaxY + paragraphSpacing` instead. (Companion to FB15131180; this one fixes Y, the other fixes height.)
-    func fixPhantomTrailingCaret() {
-        if let indicator = subviews.first(where: { type(of: $0) == NSTextInsertionIndicator.self }),
-           observedCaretIndicator !== indicator {
-            caretIndicatorObservation?.invalidate()
-            observedCaretIndicator = indicator
-            caretIndicatorObservation = indicator.observe(\.frame, options: [.new]) { [weak self] _, _ in
-                guard let self, !self.isApplyingCaretShift else { return }
-                self.applyBlockImageCaretPolicy()
-                self.fixPhantomTrailingCaret()
-                self.applyLiveTableCaretPolicy()
-            }
+    /// Watch the current insertion indicator, re-arming when AppKit swaps it.
+    ///
+    /// Both hooks re-assert a policy the view does not own: AppKit restores
+    /// `isHidden` and `displayMode` to their defaults on its own blink, AFTER
+    /// the policy has run and BEFORE the frame is painted — measured on the same
+    /// subview. Setting either once only lasts until that blink.
+    func observeCaretIndicator() {
+        guard let indicator = subviews.first(where: { type(of: $0) == NSTextInsertionIndicator.self }),
+              observedCaretIndicator !== indicator else { return }
+        caretIndicatorObservation?.invalidate()
+        caretVisibilityObservation?.invalidate()
+        observedCaretIndicator = indicator
+        caretVisibilityObservation = indicator.observe(\.isHidden, options: [.new]) { [weak self] _, _ in
+            guard let self, !self.isApplyingCaretShift else { return }
+            self.applyBlockImageCaretPolicy()
         }
+        caretIndicatorObservation = indicator.observe(\.frame, options: [.new]) { [weak self] _, _ in
+            guard let self, !self.isApplyingCaretShift else { return }
+            self.applyBlockImageCaretPolicy()
+            self.fixPhantomTrailingCaret()
+            self.applyLiveTableCaretPolicy()
+        }
+    }
+
+    func fixPhantomTrailingCaret() {
+        observeCaretIndicator()
         guard let ts = textStorage, let indicator = observedCaretIndicator,
               let tlm = textLayoutManager,
               let tcs = tlm.textContentManager as? NSTextContentStorage else { return }

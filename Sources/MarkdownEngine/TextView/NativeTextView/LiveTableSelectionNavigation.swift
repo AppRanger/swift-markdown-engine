@@ -537,7 +537,10 @@ extension NativeTextView {
         let navigation = LiveTableSelectionNavigation(dataSource: manager)
         navigation.seam = LiveTableGeometrySeam(
             hit: { [weak self] point in
-                guard let self, self.viewportHasLiveTableRow else { return nil }
+                guard let self else { return nil }
+                guard self.viewportHasLiveTableRow else {
+                    return nil
+                }
                 let hit = self.liveTableHit(at: point)
                 // Answered live, so there is nothing left to re-aim.
                 if hit != nil { self.pendingLiveTableClick = nil }
@@ -548,7 +551,8 @@ extension NativeTextView {
                 return self.liveTableCaretRect(forOffset: offset)
             },
             noteUnresolved: { [weak self] point in
-                self?.pendingLiveTableClick = point
+                guard let self else { return }
+                self.pendingLiveTableClick = (point, self.liveTableSignature)
             }
         )
         manager.textSelectionNavigation = navigation
@@ -592,6 +596,30 @@ extension NativeTextView {
     /// viewport instead: a click can only land on something drawn, and only the
     /// viewport is drawn. Runs over attribute runs, not fragments, and stops at
     /// the first hit.
+    /// Which table is currently drawing its grid, as one number: the location of
+    /// the first live row, or -1 for none.
+    ///
+    /// A pending click is answered only once this CHANGES. "Some table is live"
+    /// is the wrong question when the click moves the caret from one table to
+    /// another: the old table's rows are still stamped at that moment, so the
+    /// point misses and the click is thrown away just before the table it was
+    /// aimed at goes live.
+    var liveTableSignature: Int {
+        guard let storage = textStorage, storage.length > 0 else { return -1 }
+        let range = liveTableScanRange ?? NSRange(location: 0, length: storage.length)
+        guard range.length > 0, NSMaxRange(range) <= storage.length else { return -1 }
+        var signature = -1
+        storage.enumerateAttribute(
+            .liveTableRow, in: range, options: [.longestEffectiveRangeNotRequired]
+        ) { value, subrange, stop in
+            if value != nil {
+                signature = subrange.location
+                stop.pointee = true
+            }
+        }
+        return signature
+    }
+
     var viewportHasLiveTableRow: Bool {
         guard let storage = textStorage, storage.length > 0 else { return false }
         let range = liveTableScanRange ?? NSRange(location: 0, length: storage.length)
