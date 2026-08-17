@@ -84,6 +84,12 @@ public struct MarkdownEditorConfiguration: Sendable {
     /// so this stays the embedder's explicit decision rather than something the
     /// engine infers from a color it happens to see.
     public var cursorFollowsSpanInk: Bool
+    /// Opt-in inline commands (e.g. `@font(size: 18){text}`). Empty by
+    /// default: an unregistered name stays literal text. Order defines match
+    /// precedence among directives; built-in constructs always win first.
+    public var directives: [any MarkdownDirective]
+    /// Marker configuration for ``directives`` (default `@`).
+    public var directiveSettings: DirectiveRegistrySettings
 
     public init(
         theme: MarkdownEditorTheme = .default,
@@ -110,7 +116,9 @@ public struct MarkdownEditorConfiguration: Sendable {
         heightBehavior: HeightBehavior = .scrolls,
         rawSourceMode: Bool = false,
         extensions: [any MarkdownExtension] = [],
-        cursorFollowsSpanInk: Bool = false
+        cursorFollowsSpanInk: Bool = false,
+        directives: [any MarkdownDirective] = [],
+        directiveSettings: DirectiveRegistrySettings = .default
     ) {
         self.theme = theme
         self.services = services
@@ -137,6 +145,8 @@ public struct MarkdownEditorConfiguration: Sendable {
         self.rawSourceMode = rawSourceMode
         self.extensions = extensions
         self.cursorFollowsSpanInk = cursorFollowsSpanInk
+        self.directives = directives
+        self.directiveSettings = directiveSettings
     }
 
     public static let `default` = MarkdownEditorConfiguration()

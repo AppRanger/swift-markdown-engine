@@ -8,6 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Directive seam (parsing)**: opt-in named inline commands with typed
+  arguments, for constructs that need a name and parameters rather than
+  delimiters. A `MarkdownDirective` declares a name, a form — self-contained
+  (`@pagebreak`) or container (`@font(size: 18){text}`) — and a parameter
+  schema; register instances via `MarkdownEditorConfiguration.directives`.
+  Directives never emit ranges and project into the AST as extension-shaped
+  nodes under a reserved `directive.` id namespace, so marker shrink, caret
+  reveal, token projection, incremental restyle, and rich copy apply unchanged.
+  The directive registry folds into the existing grammar fingerprint, so a
+  directive-free registry is byte-identical to before. The marker defaults to
+  `@` and is configurable per registry and per directive; unregistered names
+  stay literal text. Styling and autocomplete follow separately. A directive whose body
+  contains a span claimed by an earlier pass — a code span or a backslash
+  escape — stays literal as a whole; constructs claimed in the same pass or
+  later (`$…$`, links, emphasis, nesting) compose normally.
 - `NativeTextViewWrapper.onTextMutation` reports exact, completed native edits
   for embedders that maintain their own source authority or mirror edits into
   another presentation.

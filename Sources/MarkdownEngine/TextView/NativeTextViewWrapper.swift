@@ -502,14 +502,22 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         // and no rebuild is needed for it to take effect.
         textView.configuration.lists = configuration.lists
         context.coordinator.configuration.lists = configuration.lists
-        // Sync registered extensions (inline spans + fenced blocks). A change alters the GRAMMAR
-        // (tokens differ under the new registry), so the coordinator's parsed
+        // Sync registered extensions (inline spans + fenced blocks) and directives. A change alters
+        // the GRAMMAR (tokens differ under the new registry), so the coordinator's parsed
         // cache must drop before the restyle — the parse-layer memos invalidate
         // themselves via the registry fingerprint.
+        //
+        // The fingerprint covers BOTH seams, so a directive-only change lands in this branch too —
+        // which means the directive list has to be copied here as well, or the restyle it triggers
+        // runs against the old one.
         let newExtensionFingerprint = configuration.extensionRegistry.fingerprint
         if newExtensionFingerprint != context.coordinator.configuration.extensionRegistry.fingerprint {
             context.coordinator.configuration.extensions = configuration.extensions
             textView.configuration.extensions = configuration.extensions
+            context.coordinator.configuration.directives = configuration.directives
+            textView.configuration.directives = configuration.directives
+            context.coordinator.configuration.directiveSettings = configuration.directiveSettings
+            textView.configuration.directiveSettings = configuration.directiveSettings
             context.coordinator.cachedParsedDocument = nil
             let fullRange = NSRange(location: 0, length: (textView.string as NSString).length)
             if fullRange.length > 0 {
