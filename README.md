@@ -125,76 +125,6 @@ configuration.services = MarkdownEditorServices(
 
 Each protocol and its no-op default are documented in DocC.
 
-### Extensions
-
-The core engine parses pure markdown. Extra constructs like `==highlight==`,
-`~~strikethrough~~`, and `::: … :::` container blocks are opt-in extensions:
-
-```swift
-var config = MarkdownEditorConfiguration()
-config.extensions = [HighlightExtension(), StrikethroughExtension(), ContainerExtension()]
-```
-
-Unregistered syntax stays literal text. An extension contributes an inline
-form (`InlineSyntax`), a fenced block form (`BlockSyntax`), or both — plus the
-attributes for its content and an HTML wrapper for rich copy. The parser owns
-all geometry, marker/fence hiding, caret reveal, and incremental restyling, so
-extensions behave identically to built-ins and cannot affect neighboring
-constructs. Conform to `MarkdownExtension` to add your own.
-
-### Directives
-
-The second opt-in seam, for constructs that need a NAME and TYPED ARGUMENTS
-rather than delimiters:
-
-```swift
-var config = MarkdownEditorConfiguration()
-config.directives = [FontDirective(), ColorDirective()]
-```
-
-```markdown
-@font(size: 18){eighteen point}, @font(size: 1.5em){half again}, @color(red){tinted}
-```
-
-Two forms: **container** (`@font(size: 18){text}`) and **self-contained**
-(`@pagebreak`). A container's font transform composes over the font inherited
-at that point in the tree, so `@font(size: 18){**bold**}` is bold *and* 18pt,
-and the same call inside a heading keeps the heading's weight. There is no
-"applies to everything after me" form — a directive's effect is scoped to its
-own node, which is what keeps per-keystroke restyling block-local.
-
-Self-contained calls parse and claim their span, so nothing inside them is
-autolinked or emphasized — but they currently render as their literal source,
-and no self-contained directive ships yet. The glyph presentation that would
-draw one as a rule or a badge arrives with a later phase.
-
-The marker defaults to `@` and is configurable per registry
-(`config.directiveSettings`) and per directive, and several markers can be
-registered at once. An unregistered name stays literal text, and a directive
-only opens at a non-word character — so `name@example.com` is never a
-directive. If your app already uses `@` to trigger mentions, give directives
-their own marker instead of disambiguating at the keystroke; the
-registered-names-only rule keeps `@alice` literal, but the trigger itself is
-still shared.
-
-Two limits worth knowing before you author one. A body holding a span claimed
-by an *earlier* parse pass — an inline code span, or a backslash escape —
-leaves the whole construct literal rather than producing a directive around it:
-
-```markdown
-@font(size: 18){this has `code` in it}   ← not a directive, stays as typed
-@font(size: 18){this has *emphasis*}     ← fine, composes normally
-```
-
-Constructs claimed in the same pass or later (`$…$`, links, emphasis, nesting)
-work inside a body. And the engine ships the seam, not a picker: there is no
-completion UI for directive names or argument values.
-
-Conform to `MarkdownDirective` to add your own; a typical one is about 30
-lines, including its argument schema and HTML. `FontDirective` and
-`ColorDirective` are reference implementations meant to be read — they are not
-registered unless you register them.
-
 ### Code Blocks
 
 **Recommended path: depend on the `MarkdownEngineCodeBlocks` product
@@ -346,6 +276,76 @@ any required environment *before* wrapping in `AnyView`, and give wrapping
 content an explicit height so it doesn't clip at the band's bottom. Composes
 with `readingWidth`; an optional `placeholder:` shows ghost text while empty;
 `header: nil` (default) adds nothing. The demo's **Header** toggle shows it.
+
+### Extensions
+
+The core engine parses pure markdown. Extra constructs like `==highlight==`,
+`~~strikethrough~~`, and `::: … :::` container blocks are opt-in extensions:
+
+```swift
+var config = MarkdownEditorConfiguration()
+config.extensions = [HighlightExtension(), StrikethroughExtension(), ContainerExtension()]
+```
+
+Unregistered syntax stays literal text. An extension contributes an inline
+form (`InlineSyntax`), a fenced block form (`BlockSyntax`), or both — plus the
+attributes for its content and an HTML wrapper for rich copy. The parser owns
+all geometry, marker/fence hiding, caret reveal, and incremental restyling, so
+extensions behave identically to built-ins and cannot affect neighboring
+constructs. Conform to `MarkdownExtension` to add your own.
+
+### Directives
+
+The second opt-in seam, for constructs that need a NAME and TYPED ARGUMENTS
+rather than delimiters:
+
+```swift
+var config = MarkdownEditorConfiguration()
+config.directives = [FontDirective(), ColorDirective()]
+```
+
+```markdown
+@font(size: 18){eighteen point}, @font(size: 1.5em){half again}, @color(red){tinted}
+```
+
+Two forms: **container** (`@font(size: 18){text}`) and **self-contained**
+(`@pagebreak`). A container's font transform composes over the font inherited
+at that point in the tree, so `@font(size: 18){**bold**}` is bold *and* 18pt,
+and the same call inside a heading keeps the heading's weight. There is no
+"applies to everything after me" form — a directive's effect is scoped to its
+own node, which is what keeps per-keystroke restyling block-local.
+
+Self-contained calls parse and claim their span, so nothing inside them is
+autolinked or emphasized — but they currently render as their literal source,
+and no self-contained directive ships yet. The glyph presentation that would
+draw one as a rule or a badge arrives with a later phase.
+
+The marker defaults to `@` and is configurable per registry
+(`config.directiveSettings`) and per directive, and several markers can be
+registered at once. An unregistered name stays literal text, and a directive
+only opens at a non-word character — so `name@example.com` is never a
+directive. If your app already uses `@` to trigger mentions, give directives
+their own marker instead of disambiguating at the keystroke; the
+registered-names-only rule keeps `@alice` literal, but the trigger itself is
+still shared.
+
+Two limits worth knowing before you author one. A body holding a span claimed
+by an *earlier* parse pass — an inline code span, or a backslash escape —
+leaves the whole construct literal rather than producing a directive around it:
+
+```markdown
+@font(size: 18){this has `code` in it}   ← not a directive, stays as typed
+@font(size: 18){this has *emphasis*}     ← fine, composes normally
+```
+
+Constructs claimed in the same pass or later (`$…$`, links, emphasis, nesting)
+work inside a body. And the engine ships the seam, not a picker: there is no
+completion UI for directive names or argument values.
+
+Conform to `MarkdownDirective` to add your own; a typical one is about 30
+lines, including its argument schema and HTML. `FontDirective` and
+`ColorDirective` are reference implementations meant to be read — they are not
+registered unless you register them.
 
 ## Demo
 
