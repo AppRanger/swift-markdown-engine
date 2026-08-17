@@ -13,7 +13,7 @@ import Foundation
 
 extension MarkdownStyler {
 
-    enum TableAlignment {
+    enum TableAlignment: Equatable {
         case left
         case center
         case right
@@ -25,11 +25,12 @@ extension MarkdownStyler {
         let rows: [[String]]
     }
 
-    /// Rendered-table image cache. A table's pixels depend only on its source,
-    /// font, colors, and appearance — so identical keys can reuse the NSImage
-    /// instead of re-rendering every inactive table on every keystroke.
-    private static let tableImageCache: NSCache<NSString, NSImage> = {
-        let cache = NSCache<NSString, NSImage>()
+    /// Rendered-table cache. A table's pixels AND its measured geometry depend
+    /// only on its source, font, colors, and appearance — so identical keys can
+    /// reuse the whole render instead of re-measuring and re-rasterizing every
+    /// inactive table on every keystroke.
+    private static let tableRenderCache: NSCache<NSString, RenderedTable> = {
+        let cache = NSCache<NSString, RenderedTable>()
         // Must exceed a document's unique-table count or a full restyle (load /
         // theme / font change) re-renders every table (same thrash class as the
         // metadata cap). NSCache still auto-evicts under memory pressure.
@@ -130,10 +131,8 @@ extension MarkdownStyler {
         return computed
     }
 
-    /// Returns the rendered image for `source`, from cache when possible.
-    /// `rendered` is true only when a fresh render actually happened.
-    /// `availableWidth` caps the table's width (cells wrap onto extra lines);
-    /// it is part of the cache key because the layout depends on it.
+    /// The rendered image for `source`, from cache when possible. `rendered` is
+    /// true only when a fresh render actually happened.
     static func tableImage(
         for source: String,
         parsed: ParsedTable,
@@ -141,16 +140,33 @@ extension MarkdownStyler {
         appearance: NSAppearance,
         availableWidth: CGFloat
     ) -> (image: NSImage, rendered: Bool) {
+        let result = tableRender(
+            for: source, parsed: parsed, ctx: ctx,
+            appearance: appearance, availableWidth: availableWidth
+        )
+        return (result.render.image, result.rendered)
+    }
+
+    /// Returns the rendered table — pixels plus measured geometry — from cache
+    /// when possible. `availableWidth` caps the table's width (cells wrap onto
+    /// extra lines); it is part of the cache key because the layout depends on it.
+    static func tableRender(
+        for source: String,
+        parsed: ParsedTable,
+        ctx: StylingContext,
+        appearance: NSAppearance,
+        availableWidth: CGFloat
+    ) -> (render: RenderedTable, rendered: Bool) {
         let widthKey = Int(availableWidth.rounded())
         // The extension registry is part of the key: `==x==` in a cell renders
         // highlighted under one config and literal under another — those must
         // never share a cached image.
         let extensionKey = ctx.configuration.extensionRegistry.fingerprint
         let key = (themeKeyPrefix(ctx: ctx, appearance: appearance) + "|x\(extensionKey)|w\(widthKey)|" + source) as NSString
-        if let cached = tableImageCache.object(forKey: key) {
+        if let cached = tableRenderCache.object(forKey: key) {
             return (cached, false)
         }
-        let image = renderTable(
+        let drawn = renderTable(
             parsed,
             baseFont: ctx.baseFont,
             theme: ctx.configuration.theme,
@@ -160,8 +176,9 @@ extension MarkdownStyler {
             availableWidth: availableWidth,
             extensions: ctx.configuration.extensions
         )
-        tableImageCache.setObject(image, forKey: key)
-        return (image, true)
+        let box = RenderedTable(image: drawn.image, geometry: drawn.geometry)
+        tableRenderCache.setObject(box, forKey: key)
+        return (box, true)
     }
 
     static func styleTables(_ ctx: StylingContext) -> [StyledRange] {
@@ -239,13 +256,14 @@ extension MarkdownStyler {
             // only exceeds it when the per-column floors genuinely don't fit,
             // in which case the scrollable overlay below takes over.
             let containerWidth = effectiveContainerWidth(for: ctx)
-            let (image, rendered) = tableImage(
+            let (render, rendered) = tableRender(
                 for: source,
                 parsed: parsed,
                 ctx: ctx,
                 appearance: renderAppearance,
                 availableWidth: containerWidth
             )
+            let image = render.image
             if rendered { renderedCount += 1 }
             let imageBounds = CGRect(x: 0, y: 0, width: image.size.width, height: image.size.height)
             // Wide tables → scrollable mode (NSScrollView overlay); narrow → collapsed.
@@ -261,16 +279,27 @@ extension MarkdownStyler {
                     sourceID: computedSourceID
                 )
                 : .collapsedSource(markerTexts: [])
+            let gapBelow = ctx.baseDefaultLineHeight * 0.5
             _ = appendRenderedStandaloneBlock(
                 for: token,
                 rawContent: source,
                 image: image,
                 imageBounds: imageBounds,
-                paragraphSpacingBefore: ctx.baseDefaultLineHeight * 0.5,
-                paragraphSpacing: ctx.baseDefaultLineHeight * 0.5,
+                paragraphSpacingBefore: gapBelow,
+                paragraphSpacing: gapBelow,
                 alignment: .left,
                 mode: mode,
                 restyleOnWidthChange: true,
+                // Stamped so a consumer can locate every rendered table, its grid
+                // and its source span by scanning one attribute.
+                extraAnchorAttrs: [
+                    .tableAnchor: TableAnchor(
+                        render: render,
+                        sourceRange: token.range,
+                        sourceID: computedSourceID,
+                        gapBelow: gapBelow
+                    ),
+                ],
                 ctx: ctx,
                 attrs: &attrs
             )
@@ -454,29 +483,34 @@ extension MarkdownStyler {
 
     // MARK: - Rendering
 
-    private static func renderTable(
+    /// Measured geometry plus the formatted cell strings the draw pass reuses.
+    /// The strings must be shared: `formattedCellString` runs the inline parser
+    /// per cell, so re-formatting while drawing would double every fresh render.
+    private struct TableLayout {
+        let geometry: TableGeometry
+        let headerCells: [NSAttributedString]
+        let bodyCells: [[NSAttributedString]]
+    }
+
+    /// Everything the render needs, computed without a graphics context.
+    ///
+    /// Takes no appearance: cell colors never were resolved under one —
+    /// `formattedCellString` stores dynamic NSColors that resolve when AppKit runs
+    /// the lazy draw block. Only the border and header fill are pre-resolved, and
+    /// both are draw-side.
+    private static func measureTable(
         _ table: ParsedTable,
         baseFont: NSFont,
         theme: MarkdownEditorTheme,
         codeBackgroundColor: NSColor,
         latex: any LatexRenderer,
-        appearance: NSAppearance,
         availableWidth: CGFloat,
         extensions: [any MarkdownExtension] = []
-    ) -> NSImage {
+    ) -> TableLayout {
         let columnCount = table.alignments.count
         let cellHPadding: CGFloat = 12
         let cellVPadding: CGFloat = 6
         let borderWidth: CGFloat = 1
-        // Resolve under the real appearance: `.withAlphaComponent()` freezes a dynamic color otherwise.
-        func mutedColor(alpha: CGFloat) -> NSColor {
-            var resolved: NSColor = theme.mutedText
-            appearance.performAsCurrentDrawingAppearance {
-                resolved = theme.mutedText.usingColorSpace(.sRGB) ?? theme.mutedText
-            }
-            return resolved.withAlphaComponent(alpha)
-        }
-        let borderColor = mutedColor(alpha: 0.5)
         let baseLineHeight: CGFloat = ceil(baseFont.ascender - baseFont.descender + baseFont.leading)
         let minColumnContentWidth: CGFloat = 16
 
@@ -606,7 +640,56 @@ extension MarkdownStyler {
             rowTop[i + 1] = rowTop[i] + rowContentHeights[i] + 2 * cellVPadding + borderWidth
         }
 
-        let alignments = table.alignments
+        return TableLayout(
+            geometry: TableGeometry(
+                columnCount: columnCount,
+                rowCount: rowCount,
+                borderWidth: borderWidth,
+                cellHPadding: cellHPadding,
+                cellVPadding: cellVPadding,
+                columnLeft: columnLeft,
+                rowTop: rowTop,
+                columnWidths: columnWidths,
+                rowContentHeights: rowContentHeights,
+                alignments: table.alignments,
+                totalSize: size
+            ),
+            headerCells: headerCells,
+            bodyCells: bodyCells
+        )
+    }
+
+    /// Rasterize a measured table. The draw block below is the old one verbatim;
+    /// its numbers just arrive through a struct instead of captured locals.
+    private static func drawTable(
+        _ layout: TableLayout,
+        theme: MarkdownEditorTheme,
+        appearance: NSAppearance
+    ) -> NSImage {
+        let g = layout.geometry
+        // Local bindings so the moved draw block reads unchanged.
+        let columnCount = g.columnCount
+        let rowCount = g.rowCount
+        let borderWidth = g.borderWidth
+        let cellHPadding = g.cellHPadding
+        let cellVPadding = g.cellVPadding
+        let columnLeft = g.columnLeft
+        let rowTop = g.rowTop
+        let rowContentHeights = g.rowContentHeights
+        let alignments = g.alignments
+        let size = g.totalSize
+        let headerCells = layout.headerCells
+        let bodyCells = layout.bodyCells
+
+        // Resolve under the real appearance: `.withAlphaComponent()` freezes a dynamic color otherwise.
+        func mutedColor(alpha: CGFloat) -> NSColor {
+            var resolved: NSColor = theme.mutedText
+            appearance.performAsCurrentDrawingAppearance {
+                resolved = theme.mutedText.usingColorSpace(.sRGB) ?? theme.mutedText
+            }
+            return resolved.withAlphaComponent(alpha)
+        }
+        let borderColor = mutedColor(alpha: 0.5)
         let headerFill = mutedColor(alpha: 0.08)
 
         // Flipped image so AppKit handles the y-flip; a manual transform mirror would flip glyphs too.
@@ -685,6 +768,28 @@ extension MarkdownStyler {
             }
             return true
         }
+    }
+
+    private static func renderTable(
+        _ table: ParsedTable,
+        baseFont: NSFont,
+        theme: MarkdownEditorTheme,
+        codeBackgroundColor: NSColor,
+        latex: any LatexRenderer,
+        appearance: NSAppearance,
+        availableWidth: CGFloat,
+        extensions: [any MarkdownExtension] = []
+    ) -> (image: NSImage, geometry: TableGeometry) {
+        let layout = measureTable(
+            table,
+            baseFont: baseFont,
+            theme: theme,
+            codeBackgroundColor: codeBackgroundColor,
+            latex: latex,
+            availableWidth: availableWidth,
+            extensions: extensions
+        )
+        return (drawTable(layout, theme: theme, appearance: appearance), layout.geometry)
     }
 
     // MARK: - Scrollable table helpers
