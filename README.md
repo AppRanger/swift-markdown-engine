@@ -156,20 +156,44 @@ config.directives = [FontDirective(), ColorDirective()]
 @font(size: 18){eighteen point}, @font(size: 1.5em){half again}, @color(red){tinted}
 ```
 
-Two forms: **self-contained** (`@pagebreak`) and **container**
-(`@font(size: 18){text}`). A container's font transform composes over the font
-inherited at that point in the tree, so `@font(size: 18){**bold**}` is bold
-*and* 18pt, and the same call inside a heading keeps the heading's weight.
-There is no "applies to everything after me" form — a directive's effect is
-scoped to its own node, which is what keeps per-keystroke restyling
-block-local.
+Two forms: **container** (`@font(size: 18){text}`) and **self-contained**
+(`@pagebreak`). A container's font transform composes over the font inherited
+at that point in the tree, so `@font(size: 18){**bold**}` is bold *and* 18pt,
+and the same call inside a heading keeps the heading's weight. There is no
+"applies to everything after me" form — a directive's effect is scoped to its
+own node, which is what keeps per-keystroke restyling block-local.
+
+Self-contained calls parse and claim their span, so nothing inside them is
+autolinked or emphasized — but they currently render as their literal source,
+and no self-contained directive ships yet. The glyph presentation that would
+draw one as a rule or a badge arrives with a later phase.
 
 The marker defaults to `@` and is configurable per registry
 (`config.directiveSettings`) and per directive, and several markers can be
 registered at once. An unregistered name stays literal text, and a directive
 only opens at a non-word character — so `name@example.com` is never a
-directive. Conform to `MarkdownDirective` to add your own; a typical one is
-about 30 lines, including its argument schema and HTML.
+directive. If your app already uses `@` to trigger mentions, give directives
+their own marker instead of disambiguating at the keystroke; the
+registered-names-only rule keeps `@alice` literal, but the trigger itself is
+still shared.
+
+Two limits worth knowing before you author one. A body holding a span claimed
+by an *earlier* parse pass — an inline code span, or a backslash escape —
+leaves the whole construct literal rather than producing a directive around it:
+
+```markdown
+@font(size: 18){this has `code` in it}   ← not a directive, stays as typed
+@font(size: 18){this has *emphasis*}     ← fine, composes normally
+```
+
+Constructs claimed in the same pass or later (`$…$`, links, emphasis, nesting)
+work inside a body. And the engine ships the seam, not a picker: there is no
+completion UI for directive names or argument values.
+
+Conform to `MarkdownDirective` to add your own; a typical one is about 30
+lines, including its argument schema and HTML. `FontDirective` and
+`ColorDirective` are reference implementations meant to be read — they are not
+registered unless you register them.
 
 ### Code Blocks
 
@@ -328,6 +352,13 @@ with `readingWidth`; an optional `placeholder:` shows ghost text while empty;
 A runnable SwiftUI demo lives in [`Demo/`](Demo/MarkdownEngineDemo.xcodeproj).
 Open it in Xcode and hit **Run** — the demo references the package via
 a local path, so any engine edit rebuilds into the demo on the next run.
+
+Its sample document is ordered by where each construct comes from rather than
+by feature: core markdown first, then the optional bridge products, then the
+two opt-in seams. The toolbar's **Opt-in seams** toggle unregisters the
+extensions and directives at runtime, so that last part collapses into literal
+text while the rest doesn't move a pixel — the fastest way to see what the core
+grammar actually knows.
 
 > If you're seeing a "missing package product" error, it's almost always
 > stale package cache. Use **File → Packages → Reset Package Caches**
