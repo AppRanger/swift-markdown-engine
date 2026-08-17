@@ -228,7 +228,42 @@ extension MarkdownStyler {
 
             let isActive = ctx.activeTokenIndices.contains(idx)
             if isActive {
-                // Caret inside the table — show editable source, pipes muted like other syntax.
+                // Caret inside the table. Prefer the live grid — it looks like
+                // the rendered table but is real, typeable text. Tables it can't
+                // lay out (wrapping rows, wider than the column, inline
+                // constructs it doesn't style yet) fall back to raw pipes below.
+                let availableWidth = effectiveContainerWidth(for: ctx)
+                let rows = TableCells.rows(in: ctx.nsText, tableRange: token.range)
+                // Measure only — never rasterize the active table: its source
+                // changes on every keystroke, so each one would insert a
+                // throwaway image and evict genuinely reused cache entries.
+                let layout = measureTable(
+                    parsed,
+                    baseFont: ctx.baseFont,
+                    theme: ctx.configuration.theme,
+                    codeBackgroundColor: ctx.codeBackgroundColor,
+                    latex: ctx.services.latex,
+                    availableWidth: availableWidth,
+                    extensions: ctx.configuration.extensions
+                )
+                if canGoLive(
+                    layout: layout,
+                    rows: rows,
+                    availableWidth: availableWidth,
+                    text: ctx.nsText,
+                    registry: ctx.configuration.extensionRegistry
+                ) {
+                    styleLiveTable(
+                        tableRange: token.range,
+                        layout: layout,
+                        rows: rows,
+                        ctx: ctx,
+                        attrs: &attrs
+                    )
+                    continue
+                }
+
+                // Fallback: editable source, pipes muted like other syntax.
                 let muted = ctx.configuration.theme.mutedText
                 let body = ctx.configuration.theme.bodyText
                 attrs.append((token.range, [.foregroundColor: body, .font: ctx.baseFont]))
@@ -339,7 +374,9 @@ extension MarkdownStyler {
         return ParsedTable(header: paddedHeader, alignments: paddedAlign, rows: rows)
     }
 
-    private static func parseTableRow(_ line: String) -> [String] {
+    /// Internal, not private: the live form's cell scanner is pinned against
+    /// this splitter so the two forms cannot disagree about cell boundaries.
+    static func parseTableRow(_ line: String) -> [String] {
         var s = line.trimmingCharacters(in: .whitespaces)
         if s.hasPrefix("|") { s.removeFirst() }
         if s.hasSuffix("|") { s.removeLast() }
@@ -486,10 +523,15 @@ extension MarkdownStyler {
     /// Measured geometry plus the formatted cell strings the draw pass reuses.
     /// The strings must be shared: `formattedCellString` runs the inline parser
     /// per cell, so re-formatting while drawing would double every fresh render.
-    private struct TableLayout {
+    struct TableLayout {
         let geometry: TableGeometry
         let headerCells: [NSAttributedString]
         let bodyCells: [[NSAttributedString]]
+        /// True when a column had to be narrowed below its one-line width, which
+        /// is the only way a cell can wrap. Exact, and free — the alternative is
+        /// comparing measured row heights against a font metric, which they
+        /// legitimately exceed by a point even on a single line.
+        let didShrinkColumns: Bool
     }
 
     /// Everything the render needs, computed without a graphics context.
@@ -498,7 +540,7 @@ extension MarkdownStyler {
     /// `formattedCellString` stores dynamic NSColors that resolve when AppKit runs
     /// the lazy draw block. Only the border and header fill are pre-resolved, and
     /// both are draw-side.
-    private static func measureTable(
+    static func measureTable(
         _ table: ParsedTable,
         baseFont: NSFont,
         theme: MarkdownEditorTheme,
@@ -508,11 +550,12 @@ extension MarkdownStyler {
         extensions: [any MarkdownExtension] = []
     ) -> TableLayout {
         let columnCount = table.alignments.count
-        let cellHPadding: CGFloat = 12
-        let cellVPadding: CGFloat = 6
-        let borderWidth: CGFloat = 1
+        // Shared with the live form so both place text on the same edges.
+        let cellHPadding = TableMetrics.cellHPadding
+        let cellVPadding = TableMetrics.cellVPadding
+        let borderWidth = TableMetrics.borderWidth
         let baseLineHeight: CGFloat = ceil(baseFont.ascender - baseFont.descender + baseFont.leading)
-        let minColumnContentWidth: CGFloat = 16
+        let minColumnContentWidth = TableMetrics.minColumnContentWidth
 
         // Pre-format every cell so width measurement and drawing share one NSAttributedString.
         let headerCells = table.header.map {
@@ -589,7 +632,8 @@ extension MarkdownStyler {
         let sumMax = maxWidths.reduce(0, +)
         let sumMin = minWidths.reduce(0, +)
         var columnWidths = maxWidths
-        if contentAvailable > 0, sumMax > contentAvailable {
+        let didShrinkColumns = contentAvailable > 0 && sumMax > contentAvailable
+        if didShrinkColumns {
             if sumMin >= contentAvailable {
                 columnWidths = minWidths
             } else {
@@ -655,7 +699,8 @@ extension MarkdownStyler {
                 totalSize: size
             ),
             headerCells: headerCells,
-            bodyCells: bodyCells
+            bodyCells: bodyCells,
+            didShrinkColumns: didShrinkColumns
         )
     }
 

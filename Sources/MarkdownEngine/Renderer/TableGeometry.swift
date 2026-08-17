@@ -17,6 +17,18 @@
 
 import AppKit
 
+/// The numbers the drawn grid is built from.
+///
+/// Shared because the live (editable) form has to place text on exactly the
+/// same column edges the bitmap draws; re-deriving them in two places is how a
+/// table starts twitching by a pixel whenever the caret enters it.
+enum TableMetrics {
+    static let cellHPadding: CGFloat = 12
+    static let cellVPadding: CGFloat = 6
+    static let borderWidth: CGFloat = 1
+    static let minColumnContentWidth: CGFloat = 16
+}
+
 /// Measured layout of one rendered table, in image-local (y-down) points.
 struct TableGeometry: Equatable {
 
@@ -96,6 +108,40 @@ extension TableGeometry {
     func cell(at point: CGPoint) -> (row: Int, column: Int)? {
         guard let r = row(at: point.y), let c = column(at: point.x) else { return nil }
         return (r, c)
+    }
+
+    /// Full vertical step from one row's top to the next — content, both
+    /// paddings, and the border under it.
+    func rowPitch(_ row: Int) -> CGFloat? {
+        guard row >= 0, row < rowCount else { return nil }
+        return rowTop[row + 1] - rowTop[row]
+    }
+
+    /// Left edge of a column's TEXT area.
+    func contentLeft(_ column: Int) -> CGFloat? {
+        guard column >= 0, column < columnCount else { return nil }
+        return columnLeft[column] + cellHPadding
+    }
+
+    /// Right edge of a column's TEXT area.
+    func contentRight(_ column: Int) -> CGFloat? {
+        guard column >= 0, column < columnCount else { return nil }
+        return columnLeft[column + 1] - borderWidth - cellHPadding
+    }
+
+    /// Where a cell's text actually starts, honouring the column's alignment.
+    ///
+    /// The live form needs this as an absolute x because one paragraph cannot
+    /// carry three different alignments — it stays left-aligned and each cell is
+    /// positioned outright.
+    func alignedX(row: Int, column: Int, textWidth: CGFloat) -> CGFloat? {
+        guard row >= 0, row < rowCount,
+              let left = contentLeft(column), let right = contentRight(column) else { return nil }
+        switch alignments[column] {
+        case .left:   return left
+        case .center: return left + max(0, (right - left) - textWidth) / 2
+        case .right:  return right - textWidth
+        }
     }
 }
 
