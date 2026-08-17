@@ -25,8 +25,6 @@ checkboxes.
 ## Features
 
 - **Live Markdown styling** — bold, italic, headings, lists, blockquotes, GFM tables, code, links, task checkboxes, horizontal rules
-- **Extensions** — opt-in constructs defined by a *delimiter pair* (`==highlight==`, `~~strikethrough~~`, …); add your own via [`MarkdownExtension`](#extensions)
-- **Directives** — opt-in constructs defined by a *name and typed arguments*, for what a delimiter pair can't express (`@font(size: 18){text}`); add your own via [`MarkdownDirective`](#directives)
 - **Wiki-style linking** with two-form storage / display roundtripping
   (`[[Name|<id>]]` ↔ `[[Name]]`)
 - **Image embeds** — both `![[Name]]` (Obsidian-style, embedder supplies the                           
@@ -45,6 +43,8 @@ checkboxes.
   edge while typing
 - **Drag-select autoscroll boost** for long documents
 - **Spelling & grammar** with code/LaTeX/wiki-link suppression
+- **Extensions** — opt-in constructs defined by a *delimiter pair* (`==highlight==`, `~~strikethrough~~`, …); add your own via [`MarkdownExtension`](#extensions)
+- **Directives** — opt-in constructs defined by a *name and typed arguments*, for what a delimiter pair can't express (`@font(size: 18){text}`); add your own via [`MarkdownDirective`](#directives)
 
 ## Installation
 
