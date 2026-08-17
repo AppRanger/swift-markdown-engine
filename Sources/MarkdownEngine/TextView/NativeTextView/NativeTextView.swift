@@ -54,6 +54,29 @@ final class NativeTextView: NSTextView {
     weak var observedCaretIndicator: NSView?
     var isApplyingCaretShift: Bool = false
 
+    /// Container point of a click the live-table seam could not answer.
+    ///
+    /// A table only draws its grid while the caret is inside it, so the click
+    /// that ENTERS one is resolved against the bitmap — a single anchor
+    /// character — and lands at the table's start no matter where in the grid it
+    /// was aimed. That is the "first click always goes to the top-left cell".
+    /// The point is kept until the restyle that click triggers makes the table
+    /// live, and then re-asked once.
+    var pendingLiveTableClick: CGPoint?
+
+    /// A cell the user clicked that the row's source does not contain, as the
+    /// row's line and the table it belongs to. Recorded by the hit test, acted
+    /// on after the gesture settles — hit-testing runs dozens of times per drag
+    /// and must never edit the document.
+    var pendingLiveTableCellCreation: (line: NSRange, table: NSRange, column: Int)?
+
+    /// Which side of a soft wrap the caret belongs on, when its offset sits
+    /// exactly on one. A click says so outright; everything else is inferred
+    /// from the direction the caret moved, so typing and → keep it on the line
+    /// being filled while ← and ↑ hand it to the line below.
+    var liveTableCaretHint: (offset: Int, upstream: Bool)?
+    var lastLiveTableCaretOffset: Int = 0
+
     // MARK: Drag-select state
     var dragStartMouseScreenLoc: NSPoint?
 

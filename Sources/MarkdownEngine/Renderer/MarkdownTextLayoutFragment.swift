@@ -33,6 +33,10 @@ extension NSAttributedString.Key {
     static let scrollableBlockTotalHeight = NSAttributedString.Key("ScrollableBlockTotalHeight")
     /// NSValue(range:) — full multi-line range of a rendered table, used to scope width-change restyles.
     static let scrollableBlockFullRange = NSAttributedString.Key("ScrollableBlockFullRange")
+    /// `LiveTableRowRender` — one row of the table the caret is inside, drawn by
+    /// the fragment because TextKit 2 cannot lay out columns with wrapping cells.
+    /// Stamped per row paragraph so the draw pass is one attribute read.
+    static let liveTableRow = NSAttributedString.Key("LiveTableRow")
     /// `TableAnchor` — the rendered table plus its source range, stamped on the
     /// anchor char. Lets a consumer find every rendered table and its grid by
     /// scanning one attribute, instead of recomputing the anchor's location and
@@ -56,7 +60,6 @@ public extension NSAttributedString.Key {
 }
 
 final class MarkdownTextLayoutFragment: NSTextLayoutFragment {
-
     /// Horizontal space (points) each blockquote nesting level occupies —
     /// shared so the styler's text indent and the painted bars line up.
     static let blockquoteIndentPerLevel: CGFloat = 18
@@ -94,6 +97,14 @@ final class MarkdownTextLayoutFragment: NSTextLayoutFragment {
         for fill in blockBackgroundFills(at: .zero) {
             bounds = bounds.union(fill.rect)
         }
+        // The live table grid is drawn by us and can exceed the glyph box.
+        if let render = liveTableRowRender {
+            let origin = liveTableRowOrigin(at: .zero)
+            bounds = bounds.union(CGRect(
+                x: origin.x, y: origin.y,
+                width: render.geometry.totalSize.width, height: render.rowHeight
+            ))
+        }
         return bounds
     }
 
@@ -112,6 +123,10 @@ final class MarkdownTextLayoutFragment: NSTextLayoutFragment {
         // 3. Normal text
         super.draw(at: point, in: context)
 
+        // 3b. Live table grid — the row's own text is size-hidden, so the cells
+        //     drawn here ARE the visible text.
+        drawLiveTableRow(at: point)
+
         // 4. Task checkboxes (on top of hidden [ ]/[x] markers)
         drawTaskCheckboxes(at: point, in: context)
 
@@ -125,6 +140,34 @@ final class MarkdownTextLayoutFragment: NSTextLayoutFragment {
 
         // 6. Blockquote bars (left gutter, behind nothing — text is indented)
         drawBlockquoteBars(at: point, in: context)
+    }
+
+    // MARK: - Live table
+
+    /// The row render stamped on this fragment, if it is a live table row.
+    var liveTableRowRender: LiveTableRowRender? {
+        guard let storage = textLayoutManager?.textContainer?.textView?.textStorage,
+              let range = fragmentNSRange,
+              range.location < storage.length else { return nil }
+        return storage.attribute(.liveTableRow, at: range.location, effectiveRange: nil)
+            as? LiveTableRowRender
+    }
+
+    /// Row box in fragment-local coordinates. The row's top is the first line
+    /// fragment's top, so paragraph spacing above it is not counted twice.
+    private func liveTableRowOrigin(at point: CGPoint) -> CGPoint {
+        let top = textLineFragments.first?.typographicBounds.origin.y ?? 0
+        return CGPoint(x: point.x, y: point.y + top)
+    }
+
+    private func drawLiveTableRow(at point: CGPoint) {
+        guard let render = liveTableRowRender else { return }
+        let scale = textLayoutManager?.textContainer?.textView?.window?.backingScaleFactor
+            ?? NSScreen.main?.backingScaleFactor ?? 2.0
+        func alignToPixel(_ value: CGFloat) -> CGFloat {
+            (value * scale).rounded(.toNearestOrAwayFromZero) / scale
+        }
+        render.draw(at: liveTableRowOrigin(at: point), pixelAlign: alignToPixel)
     }
 
     // MARK: - Helpers

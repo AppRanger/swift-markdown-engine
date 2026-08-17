@@ -594,6 +594,9 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
             }
             return
         }
+        let bindingLen = (text as NSString).length
+        let syncedLen = (context.coordinator.lastSyncedText as NSString).length
+        let storageLen = (textView.string as NSString).length
         if context.coordinator.didInitialFormatting
             && context.coordinator.lastSyncedText == text
             && !fontChanged {

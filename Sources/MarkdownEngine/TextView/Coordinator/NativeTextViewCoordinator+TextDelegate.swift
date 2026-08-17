@@ -15,7 +15,6 @@
 import AppKit
 
 extension NativeTextViewCoordinator {
-
     /// The complete leading syntax whose mutation can change list membership,
     /// indentation, or the positional numbering of following ordered items.
     private static let listStructurePrefixRegex = try! NSRegularExpression(
@@ -119,7 +118,6 @@ extension NativeTextViewCoordinator {
         }
         if wtActive && wtDetectedMode == .proofread { return }
 
-
         let rawSelRange = tv.selectedRange()
         let docString = tv.string
         let fullText = docString as NSString
@@ -196,10 +194,12 @@ extension NativeTextViewCoordinator {
             }
 #endif
             if storageState.storage != self.lastSyncedText {
+                let published = storageState.storage
                 DispatchQueue.main.async {
-                    self.lastSyncedText = storageState.storage
-                    self.text = storageState.storage
+                    self.lastSyncedText = published
+                    self.text = published
                 }
+            } else {
             }
         }
 
@@ -245,7 +245,6 @@ extension NativeTextViewCoordinator {
         let tokens = parsed.tokens
         let codeTokens = parsed.codeTokens
         let latexTokens = parsed.latexTokens
-        let blockLatexTokens = parsed.blockLatexTokens
         let preEditActiveTokenIndices = pendingPreEditActiveTokenIndices ?? previousActiveTokenIndices
         pendingPreEditActiveTokenIndices = nil
 
@@ -432,7 +431,6 @@ extension NativeTextViewCoordinator {
         let tokens = parsed.tokens
         let codeTokens = parsed.codeTokens
         let latexTokens = parsed.latexTokens
-        let blockLatexTokens = parsed.blockLatexTokens
 
         let prevActive = activeTokenIndices
         PerfTrace.measure("selActive") {
@@ -939,6 +937,38 @@ extension NativeTextViewCoordinator {
         if commandSelector == #selector(NSResponder.insertBacktab(_:)) {
             return handleBacktab(textView)
         }
+        // ⇧↵ inside a live table cell. A newline would END the row, so the break
+        // is written as `<br>` — what GFM defines and what the renderer turns
+        // back into a line.
+        //
+        // Matched on insertNewline: + the shift flag, NOT on insertLineBreak:.
+        // AppKit's StandardKeyBinding.dict has NO entry for shift-Return — shift
+        // is ignored there, so ⇧↵ arrives as a plain insertNewline: and a handler
+        // on insertLineBreak: (which is ⌃↵) never runs. That is what let a real
+        // newline through and split the table in two.
+        // ⌫ / ⌦ over a hard break removes all four characters at once.
+        if commandSelector == #selector(NSResponder.deleteBackward(_:))
+            || commandSelector == #selector(NSResponder.deleteForward(_:)),
+           let view = textView as? NativeTextView,
+           view.isCaretInLiveTable,
+           view.deleteLiveTableHardBreak(
+               forward: commandSelector == #selector(NSResponder.deleteForward(_:))
+           ) {
+            return true
+        }
+        let event = NSApp.currentEvent
+        let shiftHeld = event?.type == .keyDown
+            && event?.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.shift) == true
+        let wantsBreak = commandSelector == #selector(NSResponder.insertLineBreak(_:))
+            || (commandSelector == #selector(NSResponder.insertNewline(_:)) && shiftHeld)
+        if wantsBreak || commandSelector == #selector(NSResponder.insertNewline(_:)) {
+            let view = textView as? NativeTextView
+            let live = view?.isCaretInLiveTable ?? false
+            if wantsBreak, let view, live {
+                view.insertLiveTableLineBreak()
+                return true
+            }
+        }
         // While an inline [[…]] / ![[…]] preview is open, route ↑/↓/Enter/Esc to the embedder's
         // autocomplete list (it returns true to consume the key; false → normal editor handling).
         if (isWikiLinkActive || isImageEmbedActive), let handler = onInlinePreviewKey {
@@ -1100,5 +1130,4 @@ extension NativeTextViewCoordinator {
         }
         return false
     }
-
 }

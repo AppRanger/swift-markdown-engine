@@ -27,11 +27,61 @@
 import AppKit
 
 extension MarkdownStyler {
-
-    /// Whether this table can be shown in the live grid form.
+    /// Why a table cannot use the live grid form; `nil` means it can.
     ///
+    /// Named rather than a bare `false` because "it still shows raw pipes" has
+    /// half a dozen possible causes, and guessing between them is expensive.
+    enum LiveTableRefusal: Equatable {
+        case malformed
+        case widerThanContainer(tableWidth: CGFloat, available: CGFloat)
+        case surplusCells(row: Int)
+        case containsTab(row: Int)
+        case inlineConstructInCell(row: Int, column: Int)
+    }
+
     /// Every refusal here means "fall back to raw pipes", which is what the
     /// editor did for every table until now — a known, correct state.
+    static func liveTableRefusal(
+        layout: TableLayout,
+        rows: [TableCells.Row],
+        availableWidth: CGFloat,
+        text: NSString,
+        registry: ExtensionRegistry
+    ) -> LiveTableRefusal? {
+        let geometry = layout.geometry
+        guard rows.count >= 2, geometry.columnCount > 0 else { return .malformed }
+
+        // Wrapping rows are supported: the fragment draws each cell itself, so
+        // a tall cell simply makes its row taller.
+        // A table wider than the column is hosted in a scrolling image view;
+        // there is no live analogue for that yet.
+        if geometry.totalSize.width > availableWidth + 0.5 {
+            return .widerThanContainer(tableWidth: geometry.totalSize.width, available: availableWidth)
+        }
+
+        for row in rows {
+            // A surplus cell is truncated away by the parser, and the live form
+            // cannot delete characters to match.
+            if row.cells.count > geometry.columnCount { return .surplusCells(row: row.index) }
+            // A tab would jump to a stop and desync the whole chain.
+            for i in row.line.location..<NSMaxRange(row.line) where text.character(at: i) == 0x09 {
+                return .containsTab(row: row.index)
+            }
+            // Emphasis, code and extension spans are styled in the live form now.
+            // What still refuses is what the bitmap turns into an ATTACHMENT —
+            // there is no character in the source to hang an image on.
+            guard row.index != 1 else { continue }
+            for (column, cell) in row.cells.enumerated() {
+                let raw = text.substring(with: cell)
+                guard !raw.isEmpty else { continue }
+                if InlineParser.parse(raw, registry: registry).contains(where: \.rendersAsAttachment) {
+                    return .inlineConstructInCell(row: row.index, column: column)
+                }
+            }
+        }
+        return nil
+    }
+
     static func canGoLive(
         layout: TableLayout,
         rows: [TableCells.Row],
@@ -39,41 +89,145 @@ extension MarkdownStyler {
         text: NSString,
         registry: ExtensionRegistry
     ) -> Bool {
-        let geometry = layout.geometry
-        guard rows.count >= 2, geometry.columnCount > 0 else { return false }
+        liveTableRefusal(
+            layout: layout, rows: rows, availableWidth: availableWidth,
+            text: text, registry: registry
+        ) == nil
+    }
 
-        // A wrapped row would break the kern chain: the pen restarts at the head
-        // indent on the continuation line, so every kern after the break is off
-        // by the width of the first line.
-        if layout.didShrinkColumns { return false }
-        // A table wider than the column is hosted in a scrolling image view;
-        // there is no live analogue for that yet.
-        if geometry.totalSize.width > availableWidth + 0.5 { return false }
+    /// A cell's own characters, styled the way the bitmap draws them.
+    ///
+    /// Built from the RAW source, not from `formattedCellString`: the formatted
+    /// string strips markers, so its offsets no longer match the document and a
+    /// click could not be resolved back to a character. Here every character
+    /// survives and the markers are shrunk to `hiddenMarkerFontSize`, which is
+    /// how the engine hides syntax everywhere else — so the visible width still
+    /// matches what the picture measured, to within a fraction of a point.
+    ///
+    /// Constructs the bitmap renders RAW (links, wiki links) are left raw here
+    /// too, or the two forms would disagree about a column's width.
+    /// Styled cells, keyed by their source and the style inputs. Same reason as
+    /// the line-break cache: the active table re-styles on every keystroke and
+    /// only one cell has actually changed.
+    private static let liveCellCache: NSCache<NSString, NSAttributedString> = {
+        let cache = NSCache<NSString, NSAttributedString>()
+        cache.countLimit = 4096
+        return cache
+    }()
 
-        for row in rows {
-            // A surplus cell is truncated away by the parser, and the live form
-            // cannot delete characters to match.
-            if row.cells.count > geometry.columnCount { return false }
-            // A tab would jump to a stop and desync the whole chain.
-            for i in row.line.location..<NSMaxRange(row.line) where text.character(at: i) == 0x09 {
-                return false
-            }
-            // Step 1 accepts plain text only: anything the bitmap renders as an
-            // attachment or a styled span needs the cell-level inline styling
-            // that comes with the next slice.
-            guard row.index != 1 else { continue }
-            for cell in row.cells {
-                let raw = text.substring(with: cell)
-                guard raw.isEmpty || InlineParser.parse(raw, registry: registry).allSatisfy({
-                    if case .text = $0 { return true }
-                    return false
-                }) else { return false }
+    /// Everything a styled cell depends on, as one string. Shared with the
+    /// line-break cache so both are keyed on the same identity.
+    static func liveCellCacheKey(raw: String, header: Bool, ctx: StylingContext) -> String {
+        "\(header ? 1 : 0)|\(ctx.baseFont.fontName)|\(ctx.baseFont.pointSize)|"
+            + "\(ctx.configuration.extensionRegistry.fingerprint)|\(raw)"
+    }
+
+    static func liveCellString(
+        raw: String,
+        header: Bool,
+        ctx: StylingContext
+    ) -> NSAttributedString {
+        let cacheKey = liveCellCacheKey(raw: raw, header: header, ctx: ctx) as NSString
+        if let cached = liveCellCache.object(forKey: cacheKey) { return cached }
+
+        let baseFont = ctx.baseFont
+        let startFont = header
+            ? (NSFont(descriptor: baseFont.fontDescriptor.withSymbolicTraits(.bold),
+                      size: baseFont.pointSize) ?? baseFont)
+            : baseFont
+        let out = NSMutableAttributedString(string: raw, attributes: [
+            .font: startFont,
+            .foregroundColor: ctx.configuration.theme.bodyText,
+        ])
+        let hidden = ctx.latexMarkerFont
+        let ns = raw as NSString
+
+        /// Hide a marker so it occupies EXACTLY zero width.
+        ///
+        /// Shrinking to `hiddenMarkerFontSize` alone leaves ~0.05pt per marker,
+        /// and that residue decides the line count whenever a cell's formatted
+        /// width lands within it of the column edge — measured on 14% of
+        /// emphasis-heavy cells across a width sweep. The row is measured from
+        /// the stripped string, so a wider live string draws a line past its
+        /// box. Kerning each character back by its own advance makes the two
+        /// strings the same width by construction.
+        func shrink(_ range: NSRange) {
+            guard range.location >= 0, NSMaxRange(range) <= ns.length else { return }
+            for i in range.location..<NSMaxRange(range) {
+                let width = HeadingHelpers.textWidth(
+                    ns.substring(with: NSRange(location: i, length: 1)), font: hidden
+                )
+                out.addAttributes([
+                    .font: hidden,
+                    .foregroundColor: NSColor.clear,
+                    .kern: -width,
+                ], range: NSRange(location: i, length: 1))
             }
         }
-        return true
+        func addTrait(_ trait: NSFontDescriptor.SymbolicTraits, in range: NSRange) {
+            guard range.location >= 0, NSMaxRange(range) <= ns.length else { return }
+            out.enumerateAttribute(.font, in: range, options: []) { value, sub, _ in
+                guard let font = value as? NSFont, font.pointSize > 1 else { return }
+                let traits = font.fontDescriptor.symbolicTraits.union(trait)
+                if let composed = NSFont(descriptor: font.fontDescriptor.withSymbolicTraits(traits),
+                                         size: font.pointSize) {
+                    out.addAttribute(.font, value: composed, range: sub)
+                }
+            }
+        }
+
+        func walk(_ nodes: [InlineNode]) {
+            for node in nodes {
+                switch node {
+                case .text:
+                    break
+                case .emphasis(let kind, let range, let markers, let children):
+                    walk(children)
+                    // Trait first, then hide the markers — addTrait skips runs
+                    // already shrunk, so the order keeps them hidden.
+                    switch kind {
+                    case .italic: addTrait(.italic, in: range)
+                    case .bold: addTrait(.bold, in: range)
+                    case .boldItalic:
+                        addTrait(.bold, in: range)
+                        addTrait(.italic, in: range)
+                    }
+                    markers.forEach(shrink)
+                case .code(let range, let content):
+                    out.addAttributes([
+                        .font: NSFont.monospacedSystemFont(ofSize: baseFont.pointSize, weight: .regular),
+                        .backgroundColor: ctx.codeBackgroundColor,
+                    ], range: content)
+                    // The backticks on either side of the content.
+                    shrink(NSRange(location: range.location, length: content.location - range.location))
+                    shrink(NSRange(location: NSMaxRange(content),
+                                   length: NSMaxRange(range) - NSMaxRange(content)))
+                case .escape(_, _, let marker):
+                    shrink(marker)
+                case .ext(let ext):
+                    walk(ext.children)
+                    ext.markers.forEach(shrink)
+                case .link, .wikiLink, .image, .imageEmbed, .inlineLatex:
+                    // Rendered raw by the bitmap; leave raw so the widths agree.
+                    break
+                }
+            }
+        }
+        walk(InlineParser.parse(raw, registry: ctx.configuration.extensionRegistry))
+        // The break's own markup draws nothing — the layout turns it into a new
+        // line instead. Kerned to zero like every other marker, so the live
+        // string stays exactly as wide as the picture's.
+        TableCells.hardBreaks(in: raw).forEach(shrink)
+        liveCellCache.setObject(out, forKey: cacheKey)
+        return out
     }
 
     /// Emit the live grid for one table.
+    ///
+    /// The row's own characters are hidden by SIZE (not by colour — a selection
+    /// repaints colour-hidden runs opaque) and the visible grid is drawn by the
+    /// layout fragment from the stamped `LiveTableRowRender`. The paragraph's
+    /// forced line height is what reserves the room for it.
     static func styleLiveTable(
         tableRange: NSRange,
         layout: TableLayout,
@@ -84,103 +238,91 @@ extension MarkdownStyler {
         let geometry = layout.geometry
         let ns = ctx.nsText
         let hiddenFont = ctx.latexMarkerFont
-        let baseFont = ctx.baseFont
-        let boldFont = NSFont(
-            descriptor: baseFont.fontDescriptor.withSymbolicTraits(.bold),
-            size: baseFont.pointSize
-        ) ?? baseFont
 
-        // Cell text reads as body text; the structural runs below overwrite
-        // themselves on top of this.
+        // Same appearance resolution the bitmap uses, so both forms agree.
+        let appearance = ctx.layoutBridge?.firstTextContainer?.textView?.effectiveAppearance
+            ?? NSApp.effectiveAppearance
+        func mutedColor(alpha: CGFloat) -> NSColor {
+            var resolved: NSColor = ctx.configuration.theme.mutedText
+            appearance.performAsCurrentDrawingAppearance {
+                resolved = ctx.configuration.theme.mutedText.usingColorSpace(.sRGB)
+                    ?? ctx.configuration.theme.mutedText
+            }
+            return resolved.withAlphaComponent(alpha)
+        }
+        let borderColor = mutedColor(alpha: 0.5)
+        let headerFill = mutedColor(alpha: 0.08)
+
+        // Hide every character in the table; the fragment draws the real thing.
         attrs.append((tableRange, [
-            .foregroundColor: ctx.configuration.theme.bodyText,
-            .font: baseFont,
+            .font: hiddenFont,
+            .foregroundColor: NSColor.clear,
         ]))
 
-        /// Hide `from..<to` and make the run advance exactly `advance` points.
-        ///
-        /// Per character, because `.kern` is per character: a single attribute
-        /// over n characters adds n × kern, not kern. Everything but the last
-        /// character cancels its own width; the last one carries the whole step.
-        func hide(from: Int, to: Int, advance: CGFloat) {
-            guard to > from else { return }
-            for i in from..<to {
-                let width = HeadingHelpers.textWidth(
-                    ns.substring(with: NSRange(location: i, length: 1)), font: hiddenFont
-                )
-                let kern = (i == to - 1) ? advance - width : -width
-                attrs.append((NSRange(location: i, length: 1), [
-                    .font: hiddenFont,
-                    .foregroundColor: NSColor.clear,
-                    .kern: kern,
-                ]))
-            }
-        }
+        let lastRowIndex = rows.map(\.index).max() ?? 0
 
         for row in rows {
             let paragraph = ns.paragraphRange(for: NSRange(location: row.line.location, length: 0))
+            let geometryRow = geometryRow(forLine: row.index)
 
-            // The delimiter row carries no content in the picture; collapse it to
-            // the hairline that separates header from body.
-            if row.index == 1 {
-                let style = NSMutableParagraphStyle()
-                style.lineBreakMode = .byClipping
-                style.tabStops = []
-                style.defaultTabInterval = 0
-                style.minimumLineHeight = TableMetrics.borderWidth
-                style.maximumLineHeight = TableMetrics.borderWidth
-                attrs.append((paragraph, [.paragraphStyle: style]))
-                hide(from: row.line.location, to: NSMaxRange(row.line), advance: 0)
-                continue
+            var cells: [LiveTableCellLayout] = []
+            if let geometryRow, geometryRow < geometry.rowCount {
+                for (column, cell) in row.cells.enumerated() where column < geometry.columnCount {
+                    guard let left = geometry.contentLeft(column),
+                          let right = geometry.contentRight(column) else { continue }
+                    // Built from the SOURCE characters with markers shrunk, so a
+                    // click resolves back to a real document offset.
+                    let raw = ns.substring(with: cell)
+                    let isHeader = geometryRow == 0
+                    let text = liveCellString(raw: raw, header: isHeader, ctx: ctx)
+                    cells.append(LiveTableCellLayout.make(
+                        attributed: text,
+                        sourceLocation: cell.location,
+                        width: max(0, right - left),
+                        lineHeight: layout.singleLineHeight,
+                        caretRange: column < row.spans.count ? row.spans[column] : nil,
+                        font: ctx.baseFont,
+                        cacheKey: liveCellCacheKey(raw: raw, header: isHeader, ctx: ctx)
+                    ))
+                }
             }
 
-            guard let geometryRow = geometryRow(forLine: row.index) ,
-                  geometryRow < geometry.rowCount else { continue }
+            let render = LiveTableRowRender(
+                geometry: geometry,
+                geometryRow: geometryRow,
+                cells: cells,
+                lineRange: row.line,
+                tableRange: tableRange,
+                borderColor: borderColor,
+                headerFill: headerFill
+            )
 
             let style = NSMutableParagraphStyle()
-            style.alignment = .left          // each cell is positioned outright
+            style.alignment = .left
             style.lineBreakMode = .byClipping
-            // The base style installs tab stops; left in place a pasted tab would
-            // jump to one and desync every kern after it.
+            // The base style installs tab stops; a pasted tab would otherwise
+            // jump to one and desync the reserved height.
             style.tabStops = []
             style.defaultTabInterval = 0
             style.firstLineHeadIndent = 0
             style.headIndent = 0
             style.tailIndent = 0
             style.lineSpacing = 0
-            // Slack in a forced line box goes ABOVE the text, so this puts the
-            // baseline at cellVPadding + ascent — where `drawCell` puts it.
-            let lineHeight = TableMetrics.cellVPadding + geometry.rowContentHeights[geometryRow]
-            style.minimumLineHeight = lineHeight
-            style.maximumLineHeight = lineHeight
-            style.paragraphSpacing = TableMetrics.cellVPadding + TableMetrics.borderWidth
+            style.paragraphSpacing = 0
+            let height = render.rowHeight
+            style.minimumLineHeight = height
+            style.maximumLineHeight = height
             if row.index == 0 {
-                style.paragraphSpacingBefore = ctx.baseDefaultLineHeight * 0.5 + TableMetrics.borderWidth
+                style.paragraphSpacingBefore = ctx.baseDefaultLineHeight * 0.5
             }
-            attrs.append((paragraph, [.paragraphStyle: style]))
-
-            let isHeader = geometryRow == 0
-            var pen: CGFloat = 0
-            var previousEnd = row.line.location
-
-            for (column, cell) in row.cells.enumerated() where column < geometry.columnCount {
-                let raw = ns.substring(with: cell)
-                let font = isHeader ? boldFont : baseFont
-                let width = HeadingHelpers.textWidth(raw, font: font)
-                guard let target = geometry.alignedX(row: geometryRow, column: column, textWidth: width)
-                else { continue }
-
-                hide(from: previousEnd, to: cell.location, advance: target - pen)
-                if isHeader, cell.length > 0 {
-                    attrs.append((cell, [.font: boldFont]))
-                }
-                pen = target + width
-                previousEnd = NSMaxRange(cell)
+            if row.index == lastRowIndex {
+                style.paragraphSpacing = ctx.baseDefaultLineHeight * 0.5
             }
 
-            // Land the line exactly on the table's right edge, so the drawn
-            // border and the text box agree.
-            hide(from: previousEnd, to: NSMaxRange(row.line), advance: geometry.totalSize.width - pen)
+            attrs.append((paragraph, [
+                .paragraphStyle: style,
+                .liveTableRow: render,
+            ]))
         }
     }
 
@@ -191,6 +333,26 @@ extension MarkdownStyler {
         case 0: return 0
         case 1: return nil
         default: return line - 1
+        }
+    }
+}
+
+private extension InlineNode {
+    /// True when the bitmap renderer turns this node into an NSTextAttachment.
+    /// The live form draws the source characters, and an attachment has none to
+    /// draw — so a cell containing one keeps the raw-source fallback.
+    var rendersAsAttachment: Bool {
+        switch self {
+        case .inlineLatex, .image, .imageEmbed:
+            return true
+        case .emphasis(_, _, _, let children):
+            return children.contains(where: \.rendersAsAttachment)
+        case .link(_, _, _, _, let children):
+            return children.contains(where: \.rendersAsAttachment)
+        case .ext(let ext):
+            return ext.children.contains(where: \.rendersAsAttachment)
+        case .text, .code, .wikiLink, .escape:
+            return false
         }
     }
 }

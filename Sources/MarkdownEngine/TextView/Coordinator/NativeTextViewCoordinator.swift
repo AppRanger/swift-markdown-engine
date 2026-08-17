@@ -70,7 +70,14 @@ public final class NativeTextViewCoordinator: NSObject, NSTextViewDelegate {
     var lastWikiFingerprint: AnyHashable?
     private var busObservers: [NSObjectProtocol] = []
     private var registeredAppearanceObserverName: Notification.Name?
-    weak var textView: NSTextView?
+    weak var textView: NSTextView? {
+        didSet {
+            // The live-table navigation seam lives on the layout manager, which
+            // belongs to the view — a new view arrives without one. This is the
+            // one assignment `makeNSView` and every remount both go through.
+            (textView as? NativeTextView)?.installLiveTableNavigationIfNeeded()
+        }
+    }
     /// Owns the scroll-away header (build, content refresh, collapse/expand,
     /// teardown). Created on first reconcile with a non-nil header.
     var headerController: ScrollingHeaderController?

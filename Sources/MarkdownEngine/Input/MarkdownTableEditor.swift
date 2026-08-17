@@ -26,7 +26,6 @@
 import Foundation
 
 enum MarkdownTableEditor {
-
     /// A zero-length edit: insert `text` at `location`.
     struct Insertion: Equatable {
         let location: Int
@@ -133,6 +132,39 @@ enum MarkdownTableEditor {
     }
 
     // MARK: - Operations
+
+    /// Give a row the cells the table's header says it has.
+    ///
+    /// GFM draws a short row's missing cells as empty, so the picture shows a
+    /// cell the SOURCE does not contain — `| 1   |` under a two-column header
+    /// draws two cells but holds one. There is no character in the second to put
+    /// a caret on, so clicking it landed in the last cell that does exist.
+    /// Appending the missing `|`s makes the drawn cell real.
+    ///
+    /// Returns the insertion and, for each cell it creates, where the caret goes.
+    static func padRowInsertion(
+        in text: NSString, tableRange: NSRange, lineRange: NSRange
+    ) -> (insertion: Insertion, caretOffsets: [Int])? {
+        let lines = lineRanges(in: text, tableRange: tableRange)
+        guard lines.count >= 2 else { return nil }
+        let columns = columnCount(in: text, lines: lines)
+        let present = cellCount(in: text, lineRange: lineRange)
+        guard columns > present, present > 0 else { return nil }
+
+        let padded = usesPaddedCells(in: text, headerRange: lines[0])
+        let unit = cellUnit("", padded: padded)
+        let missing = columns - present
+        let end = NSMaxRange(lineRange)
+        let unitLength = (unit as NSString).length
+        // The row already ends in a pipe, so each unit opens its own cell. The
+        // caret goes between the padding spaces, where typing keeps the table's
+        // own spacing instead of butting against the bar.
+        let carets = (0..<missing).map { end + $0 * unitLength + (padded ? 1 : 0) }
+        return (
+            Insertion(location: end, text: String(repeating: unit, count: missing)),
+            carets
+        )
+    }
 
     /// Append an empty row below the table.
     ///

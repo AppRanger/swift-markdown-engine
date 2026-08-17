@@ -12,7 +12,6 @@ import AppKit
 import Foundation
 
 extension MarkdownStyler {
-
     enum TableAlignment: Equatable {
         case left
         case center
@@ -246,13 +245,14 @@ extension MarkdownStyler {
                     availableWidth: availableWidth,
                     extensions: ctx.configuration.extensions
                 )
-                if canGoLive(
+                let refusal = liveTableRefusal(
                     layout: layout,
                     rows: rows,
                     availableWidth: availableWidth,
                     text: ctx.nsText,
                     registry: ctx.configuration.extensionRegistry
-                ) {
+                )
+                if refusal == nil {
                     styleLiveTable(
                         tableRange: token.range,
                         layout: layout,
@@ -402,6 +402,15 @@ extension MarkdownStyler {
     // MARK: - Inline-formatted cell strings
 
     /// Raw cell → `NSAttributedString`: inline markdown applied, markers stripped, LaTeX as attachments.
+    /// `<br>` → a real newline, for the rendered (non-editable) cell string.
+    static func expandingHardBreaks(_ raw: String) -> String {
+        let breaks = TableCells.hardBreaks(in: raw)
+        guard !breaks.isEmpty else { return raw }
+        let out = NSMutableString(string: raw)
+        for range in breaks.reversed() { out.replaceCharacters(in: range, with: "\n") }
+        return out as String
+    }
+
     static func formattedCellString(
         _ raw: String,
         baseFont: NSFont,
@@ -420,6 +429,10 @@ extension MarkdownStyler {
         let out = NSMutableAttributedString()
         var extensionsByID: [String: any MarkdownExtension] = [:]
         for ext in extensions { extensionsByID[ext.id] = ext }
+        // Offsets are thrown away on this path, so the break can simply BE a
+        // newline here. It is what makes the measured row tall enough for the
+        // live grid, which reserves its height from this geometry.
+        let raw = Self.expandingHardBreaks(raw)
         appendInlineCell(
             InlineParser.parse(raw, registry: ExtensionRegistry(extensions: extensions)),
             in: raw as NSString, into: out,
@@ -527,11 +540,11 @@ extension MarkdownStyler {
         let geometry: TableGeometry
         let headerCells: [NSAttributedString]
         let bodyCells: [[NSAttributedString]]
-        /// True when a column had to be narrowed below its one-line width, which
-        /// is the only way a cell can wrap. Exact, and free — the alternative is
-        /// comparing measured row heights against a font metric, which they
-        /// legitimately exceed by a point even on a single line.
-        let didShrinkColumns: Bool
+        /// Height of one text line, measured through the same `boundingRect` path
+        /// the row heights come from. Comparing against the font metric instead
+        /// is wrong: a single line measures a point taller than
+        /// `ascender - descender + leading`.
+        let singleLineHeight: CGFloat
     }
 
     /// Everything the render needs, computed without a graphics context.
@@ -684,6 +697,13 @@ extension MarkdownStyler {
             rowTop[i + 1] = rowTop[i] + rowContentHeights[i] + 2 * cellVPadding + borderWidth
         }
 
+        // A one-character probe cannot wrap at any column width, so this is the
+        // floor every non-wrapping row sits at.
+        let singleLineHeight = max(
+            baseLineHeight,
+            cellHeight(NSAttributedString(string: "X", attributes: [.font: baseFont]), col: 0)
+        )
+
         return TableLayout(
             geometry: TableGeometry(
                 columnCount: columnCount,
@@ -693,14 +713,13 @@ extension MarkdownStyler {
                 cellVPadding: cellVPadding,
                 columnLeft: columnLeft,
                 rowTop: rowTop,
-                columnWidths: columnWidths,
                 rowContentHeights: rowContentHeights,
                 alignments: table.alignments,
                 totalSize: size
             ),
             headerCells: headerCells,
             bodyCells: bodyCells,
-            didShrinkColumns: didShrinkColumns
+            singleLineHeight: singleLineHeight
         )
     }
 

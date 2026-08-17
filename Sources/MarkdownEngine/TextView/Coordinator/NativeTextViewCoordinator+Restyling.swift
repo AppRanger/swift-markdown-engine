@@ -152,7 +152,6 @@ extension NativeTextViewCoordinator {
         textView.textStorage?.setAttributedString(built)
         textView.textStorage?.endEditing()
 
-
         textView.typingAttributes = TextStylingService.makeBaseTypingAttributes(
             font: baseFont,
             paragraphStyle: paragraph,
@@ -189,8 +188,13 @@ extension NativeTextViewCoordinator {
 
         // Reconcile wide-table overlays after layout settles.
         if let nativeTextView = textView as? NativeTextView {
+            // A document switch replaces the storage under the same view; the
+            // seam is a property of the layout manager and survives, but assert
+            // it rather than assume, and re-place the caret for the new grid.
+            nativeTextView.installLiveTableNavigationIfNeeded()
             DispatchQueue.main.async { [weak nativeTextView] in
                 nativeTextView?.updateWideTableOverlays()
+                nativeTextView?.applyLiveTableCaretPolicy()
             }
         }
     }
@@ -233,8 +237,13 @@ extension NativeTextViewCoordinator {
         )
         // Reconcile wide-table overlays after layout settles.
         if let nativeTextView = textView as? NativeTextView {
+            nativeTextView.installLiveTableNavigationIfNeeded()
             DispatchQueue.main.async { [weak nativeTextView] in
                 nativeTextView?.updateWideTableOverlays()
+                // A restyle re-measures the grid: the caret's cell may have
+                // re-wrapped under it without the selection ever changing, so
+                // the indicator's own frame KVO never fires.
+                nativeTextView?.applyLiveTableCaretPolicy()
             }
         }
     }

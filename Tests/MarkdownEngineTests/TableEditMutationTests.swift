@@ -16,7 +16,6 @@ import Testing
 
 @MainActor
 struct TableEditMutationTests {
-
     private let source = """
     | Name | Qty |
     |---|---|
@@ -177,5 +176,58 @@ struct TableEditMutationTests {
         let parsed = MarkdownStyler.parseTableSource(textView.string)
         #expect(parsed?.alignments.count == 3)
         #expect(parsed?.rows.count == 2)
+    }
+}
+
+/// A row with fewer cells than the header draws the rest empty, so the grid
+/// offers a cell the source does not contain — there is nothing in it to put a
+/// caret on, and the click fell into the neighbouring cell instead.
+@Suite("Padding a short row")
+struct TableShortRowPaddingTests {
+    private let table = "| a | b |\n|---|---|\n| 1   |"
+
+    private func padded(_ source: String) throws -> (String, [Int]) {
+        let ns = source as NSString
+        let range = NSRange(location: 0, length: ns.length)
+        let lines = MarkdownTableEditor.lineRanges(in: ns, tableRange: range)
+        let last = try #require(lines.last)
+        let result = try #require(MarkdownTableEditor.padRowInsertion(
+            in: ns, tableRange: range, lineRange: last
+        ))
+        let out = NSMutableString(string: source)
+        out.insert(result.insertion.text, at: result.insertion.location)
+        return (out as String, result.caretOffsets)
+    }
+
+    @Test func theMissingCellBecomesReal() throws {
+        let (result, _) = try padded(table)
+        #expect(result == "| a | b |\n|---|---|\n| 1   |  |")
+        let ns = result as NSString
+        let rows = TableCells.rows(in: ns, tableRange: NSRange(location: 0, length: ns.length))
+        let row = try #require(rows.last)
+        #expect(row.cells.count == 2)
+    }
+
+    /// The caret has to land INSIDE the new cell, or the click still misses.
+    @Test func theCaretLandsInTheNewCell() throws {
+        let (result, carets) = try padded(table)
+        let ns = result as NSString
+        let rows = TableCells.rows(in: ns, tableRange: NSRange(location: 0, length: ns.length))
+        let span = try #require(rows.last?.spans.last)
+        let caret = try #require(carets.first)
+        #expect(caret >= span.location && caret <= NSMaxRange(span))
+    }
+
+    /// Nothing to do when the row is already full — a click must not rewrite the
+    /// file for no reason.
+    @Test func aFullRowIsLeftAlone() throws {
+        let source = "| a | b |\n|---|---|\n| 1 | 2 |"
+        let ns = source as NSString
+        let range = NSRange(location: 0, length: ns.length)
+        let lines = MarkdownTableEditor.lineRanges(in: ns, tableRange: range)
+        let last = try #require(lines.last)
+        #expect(MarkdownTableEditor.padRowInsertion(
+            in: ns, tableRange: range, lineRange: last
+        ) == nil)
     }
 }

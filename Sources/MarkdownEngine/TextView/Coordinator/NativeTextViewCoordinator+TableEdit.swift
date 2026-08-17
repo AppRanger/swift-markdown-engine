@@ -16,7 +16,6 @@
 import AppKit
 
 extension NativeTextViewCoordinator {
-
     func applyTableEdit(_ request: TableEditRequest, to textView: NSTextView) {
         guard lastAppliedTableEditID != request.id else { return }
         lastAppliedTableEditID = request.id
@@ -29,7 +28,9 @@ extension NativeTextViewCoordinator {
         // The range came from a published geometry, which SwiftUI may re-deliver
         // after the document moved on. Require it to still name a live table
         // exactly, so a stale offset lands nowhere rather than mid-paragraph.
-        guard isLiveTable(request.tableRange, in: text) else { return }
+        guard isLiveTable(request.tableRange, in: text) else {
+            return
+        }
 
         switch request.operation {
         case .appendRow:

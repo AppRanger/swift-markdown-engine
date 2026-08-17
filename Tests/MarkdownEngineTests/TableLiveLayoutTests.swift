@@ -4,10 +4,11 @@
 //
 //  Created by Luca Chen on 17.08.26.
 //
-//  The live (typeable) table form has to put each cell's glyphs where the
-//  bitmap draws them, or the table visibly shifts the moment the caret enters
-//  it. These lay the styled text out for real and measure the caret x of each
-//  cell's first character against the measured grid.
+//  The live (typeable) table form. TextKit 2 cannot lay out columns whose cells
+//  wrap, so the row is one hidden line whose paragraph reserves the grid's
+//  height, and the layout fragment draws the cells itself. These pin the two
+//  halves of that contract: the reserved height matches the measured grid, and
+//  each row carries the cell layouts the fragment will draw.
 //
 
 import AppKit
@@ -17,7 +18,6 @@ import Testing
 
 @Suite("Live table layout")
 struct TableLiveLayoutTests {
-
     private let availableWidth: CGFloat = 650
 
     private func context(for text: String) -> MarkdownStyler.StylingContext {
@@ -39,180 +39,450 @@ struct TableLiveLayoutTests {
         return ctx
     }
 
-    /// Style the table as live and lay the result out in a real TextKit 2 stack,
-    /// so the assertions measure actual glyph positions rather than our own
-    /// arithmetic played back.
-    private func layout(_ text: String) throws -> (storage: NSTextStorage, geometry: TableGeometry) {
+    private struct Styled {
+        let attrs: [StyledRange]
+        let layout: MarkdownStyler.TableLayout
+        let rows: [TableCells.Row]
+        let text: NSString
+    }
+
+    private func styleLive(_ text: String, width: CGFloat? = nil) throws -> Styled {
         _ = NSApplication.shared
+        let available = width ?? availableWidth
         let ctx = context(for: text)
-        let tableToken = try #require(ctx.tokens.first { $0.kind == .table })
-        let parsed = try #require(MarkdownStyler.parseTableSource(ctx.nsText.substring(with: tableToken.range)))
-
-        let tableLayout = MarkdownStyler.measureTable(
-            parsed,
-            baseFont: ctx.baseFont,
-            theme: ctx.configuration.theme,
-            codeBackgroundColor: ctx.codeBackgroundColor,
-            latex: ctx.services.latex,
-            availableWidth: availableWidth,
-            extensions: ctx.configuration.extensions
+        let token = try #require(ctx.tokens.first { $0.kind == .table })
+        let parsed = try #require(MarkdownStyler.parseTableSource(ctx.nsText.substring(with: token.range)))
+        let layout = MarkdownStyler.measureTable(
+            parsed, baseFont: ctx.baseFont, theme: ctx.configuration.theme,
+            codeBackgroundColor: ctx.codeBackgroundColor, latex: ctx.services.latex,
+            availableWidth: available, extensions: ctx.configuration.extensions
         )
-        let rows = TableCells.rows(in: ctx.nsText, tableRange: tableToken.range)
-        #expect(MarkdownStyler.canGoLive(
-            layout: tableLayout, rows: rows,
-            availableWidth: availableWidth, text: ctx.nsText,
-            registry: ctx.configuration.extensionRegistry
-        ), "fixture must be live-able")
-
+        let rows = TableCells.rows(in: ctx.nsText, tableRange: token.range)
         var attrs: [StyledRange] = []
         MarkdownStyler.styleLiveTable(
-            tableRange: tableToken.range, layout: tableLayout,
-            rows: rows, ctx: ctx, attrs: &attrs
+            tableRange: token.range, layout: layout, rows: rows, ctx: ctx, attrs: &attrs
         )
-
-        let storage = NSTextStorage(string: text)
-        storage.setAttributes([.font: ctx.baseFont], range: NSRange(location: 0, length: storage.length))
-        for (range, dict) in attrs {
-            for (key, value) in dict { storage.addAttribute(key, value: value, range: range) }
-        }
-        return (storage, tableLayout.geometry)
+        return Styled(attrs: attrs, layout: layout, rows: rows, text: ctx.nsText)
     }
 
-    /// x of the caret immediately before `location`, measured by TextKit.
-    private func caretX(in storage: NSTextStorage, at location: Int) -> CGFloat {
-        let manager = NSLayoutManager()
-        let container = NSTextContainer(size: CGSize(width: 10_000, height: 10_000))
-        container.lineFragmentPadding = 0
-        manager.addTextContainer(container)
-        storage.addLayoutManager(manager)
-        manager.ensureLayout(for: container)
-        let glyph = manager.glyphIndexForCharacter(at: location)
-        let point = manager.location(forGlyphAt: glyph)
-        let fragment = manager.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
-        storage.removeLayoutManager(manager)
-        return fragment.minX + point.x
+    /// Row renders in source order.
+    private func renders(_ styled: Styled) -> [LiveTableRowRender] {
+        styled.attrs.compactMap { $0.attributes[.liveTableRow] as? LiveTableRowRender }
     }
 
-    private func lineStart(in storage: NSTextStorage, line: Int) -> Int {
-        let ns = storage.string as NSString
-        var start = 0
-        var seen = 0
-        while seen < line {
-            let range = ns.lineRange(for: NSRange(location: start, length: 0))
-            start = NSMaxRange(range)
-            seen += 1
-        }
-        return start
+    private let wrappingTable = """
+    | Rechtsform | Gründungskosten | Laufende Kosten |
+    |---|---|---|
+    | Einzelunternehmen Kleingewerbe | zwanzig bis sechzig Euro Gewerbeanmeldung jeder Gesellschafter meldet einzeln an | etwa null Euro nur Steuerberater optional |
+    | GbR | Notar und Handelsregister dreihundert bis fünfhundert Euro | Gesellschaftervertrag empfohlen Anwalt eintausend |
+    """
+
+    // MARK: - The point of the feature
+
+    /// The whole reason this exists: a table whose cells wrap must now stay a
+    /// grid instead of falling back to raw pipes.
+    @Test func aWrappingTableGoesLive() throws {
+        let styled = try styleLive(wrappingTable)
+        #expect(styled.layout.geometry.rowContentHeights.contains {
+            $0 > styled.layout.singleLineHeight + 0.5
+        }, "fixture must actually wrap, or this proves nothing")
+        #expect(MarkdownStyler.canGoLive(
+            layout: styled.layout, rows: styled.rows, availableWidth: availableWidth,
+            text: styled.text, registry: MarkdownEditorConfiguration.default.extensionRegistry
+        ))
+        #expect(!renders(styled).isEmpty)
     }
 
-    // MARK: - Column positions
+    /// The reserved paragraph height has to equal the measured row, or the
+    /// document's text jumps when the caret enters the table.
+    @Test func reservedHeightMatchesTheMeasuredGrid() throws {
+        let styled = try styleLive(wrappingTable)
+        let geometry = styled.layout.geometry
 
-    /// The load-bearing assertion: every cell's first glyph sits on the x the
-    /// measured grid says it should, for all three column alignments.
-    @Test func cellsLandOnTheMeasuredColumnEdges() throws {
-        let text = """
-        | surface | key | opens |
-        |:---|:---:|---:|
-        | Search | CmdO | overlay |
-        | Graph | CmdG | canvas |
-        """
-        let (storage, geometry) = try layout(text)
-        let ns = storage.string as NSString
-        let rows = TableCells.rows(in: ns, tableRange: NSRange(location: 0, length: ns.length))
-        let bold = NSFont(
-            descriptor: NSFont.systemFont(ofSize: 15).fontDescriptor.withSymbolicTraits(.bold),
-            size: 15
-        ) ?? NSFont.systemFont(ofSize: 15)
-
-        for row in rows where row.index != 1 {
-            let geometryRow = row.index == 0 ? 0 : row.index - 1
-            for (column, cell) in row.cells.enumerated() where cell.length > 0 {
-                let font = geometryRow == 0 ? bold : NSFont.systemFont(ofSize: 15)
-                let width = HeadingHelpers.textWidth(ns.substring(with: cell), font: font)
-                let expected = try #require(
-                    geometry.alignedX(row: geometryRow, column: column, textWidth: width)
-                )
-                let actual = caretX(in: storage, at: cell.location)
-                #expect(abs(actual - expected) < 0.5,
-                        "row \(row.index) col \(column): expected \(expected), got \(actual)")
+        for render in renders(styled) {
+            guard let row = render.geometryRow else {
+                #expect(render.rowHeight == geometry.borderWidth, "delimiter collapses to a hairline")
+                continue
             }
+            #expect(render.rowHeight == geometry.rowPitch(row))
+        }
+
+        // And the sum of the reserved rows is the table's own height.
+        let total = renders(styled).reduce(0) { $0 + $1.rowHeight }
+        #expect(abs(total - geometry.totalSize.height) < 1.5,
+                "reserved \(total) vs measured \(geometry.totalSize.height)")
+    }
+
+    /// A wrapped cell must report more than one line, or the fragment would draw
+    /// one line into a box reserved for two.
+    @Test func wrappedCellsCarryTheirLines() throws {
+        let styled = try styleLive(wrappingTable)
+        let multi = renders(styled)
+            .flatMap(\.cells)
+            .filter { $0.lineCount > 1 }
+        #expect(!multi.isEmpty, "expected at least one wrapped cell")
+        for cell in multi {
+            #expect(cell.height == CGFloat(cell.lineCount) * cell.lineHeight)
         }
     }
 
-    /// Right-aligned columns are where a mistake in the kern chain shows first,
-    /// because the target depends on the text's own width.
-    @Test func rightAlignedColumnEndsAtItsContentEdge() throws {
-        let text = """
-        | a | value |
-        |---|---:|
-        | 1 | 42 |
-        """
-        let (storage, geometry) = try layout(text)
-        let ns = storage.string as NSString
-        let rows = TableCells.rows(in: ns, tableRange: NSRange(location: 0, length: ns.length))
-        let body = try #require(rows.last)
-        let cell = body.cells[1]
-        let width = HeadingHelpers.textWidth(ns.substring(with: cell), font: NSFont.systemFont(ofSize: 15))
-        let expectedRight = try #require(geometry.contentRight(1))
-        let actualRight = caretX(in: storage, at: cell.location) + width
-        #expect(abs(actualRight - expectedRight) < 0.5)
+    /// Every row gets a render, including the delimiter — a gap would leave a
+    /// row drawn by nobody.
+    @Test func everyRowCarriesARender() throws {
+        let styled = try styleLive(wrappingTable)
+        #expect(renders(styled).count == styled.rows.count)
+        #expect(renders(styled).filter(\.isDelimiter).count == 1)
+        #expect(renders(styled).filter(\.isHeader).count == 1)
     }
 
     // MARK: - Storage identity
 
-    /// The whole design rests on this: styling changes attributes only. If a
-    /// character were added or removed here, find, copy and undo would all drift.
+    /// The whole design rests on this: styling changes attributes only. A single
+    /// added or removed character would drift find, copy and undo.
     @Test func stylingLeavesTheDocumentTextUntouched() throws {
-        let text = """
-        | a | b |
-        |---|---|
-        | 1 | 2 |
-        """
-        let (storage, _) = try layout(text)
+        let text = wrappingTable
+        let styled = try styleLive(text)
+        let storage = NSTextStorage(string: text)
+        for (range, dict) in styled.attrs {
+            for (key, value) in dict { storage.addAttribute(key, value: value, range: range) }
+        }
         #expect(storage.string == text)
     }
 
-    // MARK: - Refusals
-
-    @Test func refusesATableWhoseRowsWrap() throws {
-        _ = NSApplication.shared
-        let long = String(repeating: "wordy ", count: 60)
-        let text = "| a | b |\n|---|---|\n| \(long) | x |"
-        let ctx = context(for: text)
-        let token = try #require(ctx.tokens.first { $0.kind == .table })
-        let parsed = try #require(MarkdownStyler.parseTableSource(ctx.nsText.substring(with: token.range)))
-        let tableLayout = MarkdownStyler.measureTable(
-            parsed, baseFont: ctx.baseFont, theme: ctx.configuration.theme,
-            codeBackgroundColor: ctx.codeBackgroundColor, latex: ctx.services.latex,
-            availableWidth: availableWidth, extensions: ctx.configuration.extensions
-        )
-        let rows = TableCells.rows(in: ctx.nsText, tableRange: token.range)
-        #expect(!MarkdownStyler.canGoLive(
-            layout: tableLayout, rows: rows,
-            availableWidth: availableWidth, text: ctx.nsText,
-            registry: ctx.configuration.extensionRegistry
-        ), "a wrapping table must keep the raw-source form")
+    /// The source characters are hidden by SIZE. Hiding by colour alone would
+    /// come back opaque under a selection, printing the raw pipes over the grid.
+    @Test func tableCharactersAreHiddenBySize() throws {
+        let styled = try styleLive(wrappingTable)
+        let tableWide = try #require(styled.attrs.first { $0.range.length > 20 })
+        let font = try #require(tableWide.attributes[.font] as? NSFont)
+        #expect(font.pointSize < 1)
     }
 
-    /// Inline constructs are not styled inside a live cell yet, so a table
-    /// containing one must not go live — it would show its raw markers at a
-    /// width the grid did not measure.
-    @Test func refusesCellsWithInlineConstructs() throws {
+    // MARK: - Cells
+
+    /// Cell layouts must point at the DOCUMENT, so a click resolves to the right
+    /// character of the real text rather than an offset into a detached string.
+    @Test func cellLayoutsCarryDocumentOffsets() throws {
+        let styled = try styleLive(wrappingTable)
+        for render in renders(styled) {
+            for cell in render.cells {
+                #expect(cell.sourceLocation >= 0)
+                #expect(cell.sourceLocation + cell.attributed.length <= styled.text.length)
+                let source = styled.text.substring(
+                    with: NSRange(location: cell.sourceLocation, length: cell.attributed.length)
+                )
+                #expect(source == cell.attributed.string,
+                        "cell layout text must be the document's own characters")
+            }
+        }
+    }
+
+    /// A cell is wrapped at its column's content width — the same width the
+    /// bitmap measured, or the two forms would break at different words.
+    @Test func cellsWrapAtTheirColumnWidth() throws {
+        let styled = try styleLive(wrappingTable)
+        let geometry = styled.layout.geometry
+        for render in renders(styled) where !render.isDelimiter {
+            for (column, cell) in render.cells.enumerated() {
+                guard let left = geometry.contentLeft(column),
+                      let right = geometry.contentRight(column) else { continue }
+                #expect(abs(cell.width - (right - left)) < 0.01)
+            }
+        }
+    }
+
+    // MARK: - Narrow tables still work
+
+    @Test func aNonWrappingTableStillGoesLive() throws {
+        let styled = try styleLive("| a | b |\n|---|---|\n| 1 | 2 |")
+        #expect(MarkdownStyler.canGoLive(
+            layout: styled.layout, rows: styled.rows, availableWidth: availableWidth,
+            text: styled.text, registry: MarkdownEditorConfiguration.default.extensionRegistry
+        ))
+        for render in renders(styled) where !render.isDelimiter {
+            for cell in render.cells { #expect(cell.lineCount == 1) }
+        }
+    }
+
+    // MARK: - Refusals that remain
+
+    /// Emphasis, code and extension spans are styled in place now — the markers
+    /// keep their characters and shrink, so offsets still map to the document.
+    @Test func cellsWithEmphasisAndCodeGoLive() throws {
+        let styled = try styleLive("| **bold** | `code` |\n|---|---|\n| *a* | plain |")
+        #expect(MarkdownStyler.canGoLive(
+            layout: styled.layout, rows: styled.rows, availableWidth: availableWidth,
+            text: styled.text, registry: MarkdownEditorConfiguration.default.extensionRegistry
+        ))
+        // The markers must still be present as characters, or a click inside the
+        // cell would resolve to the wrong document offset.
+        for render in renders(styled) {
+            for cell in render.cells {
+                let source = styled.text.substring(
+                    with: NSRange(location: cell.sourceLocation, length: cell.attributed.length)
+                )
+                #expect(source == cell.attributed.string)
+            }
+        }
+    }
+
+    /// A marker is hidden by size, not removed — that is what keeps the offsets
+    /// honest while the drawn width still matches the picture.
+    @Test func emphasisMarkersAreShrunkNotDropped() throws {
+        let styled = try styleLive("| **bold** | b |\n|---|---|\n| 1 | 2 |")
+        let cell = try #require(renders(styled).first?.cells.first)
+        #expect(cell.attributed.string == "**bold**")
+        let markerFont = try #require(cell.attributed.attribute(.font, at: 0, effectiveRange: nil) as? NSFont)
+        let contentFont = try #require(cell.attributed.attribute(.font, at: 3, effectiveRange: nil) as? NSFont)
+        #expect(markerFont.pointSize < 1, "the `**` must be shrunk")
+        #expect(contentFont.pointSize > 1, "the word must not be")
+        #expect(contentFont.fontDescriptor.symbolicTraits.contains(.bold))
+    }
+
+    /// LaTeX becomes an attachment in the bitmap and has no source character to
+    /// draw in the live form, so those cells keep the raw-source fallback.
+    @Test func refusesCellsThatRenderAsAttachments() throws {
+        let styled = try styleLive("| $x^2$ | b |\n|---|---|\n| 1 | 2 |")
+        #expect(!MarkdownStyler.canGoLive(
+            layout: styled.layout, rows: styled.rows, availableWidth: availableWidth,
+            text: styled.text, registry: MarkdownEditorConfiguration.default.extensionRegistry
+        ))
+    }
+
+    /// A table wider than the container keeps the horizontal-scroll image.
+    @Test func refusesATableWiderThanTheContainer() throws {
+        let header = (0..<14).map { "spaltenüberschrift\($0)" }.joined(separator: " | ")
+        let delim = (0..<14).map { _ in "---" }.joined(separator: "|")
+        let body = (0..<14).map { "sehrlangerzellenwert\($0)" }.joined(separator: " | ")
+        let styled = try styleLive("| \(header) |\n|\(delim)|\n| \(body) |", width: 300)
+        #expect(!MarkdownStyler.canGoLive(
+            layout: styled.layout, rows: styled.rows, availableWidth: 300,
+            text: styled.text, registry: MarkdownEditorConfiguration.default.extensionRegistry
+        ))
+    }
+}
+
+// MARK: - Typing a space at the end of a cell
+
+/// A space typed at the end of a cell lands in the padding OUTSIDE the trimmed
+/// cell text. Judging the caret on the trimmed range clamped it back onto the
+/// last letter, so the character reached the file while the caret stood still —
+/// which reads as the space being swallowed.
+@Suite("Live table cell padding")
+struct LiveTableCellPaddingTests {
+    private func cell(_ source: String, width: CGFloat = 200) -> LiveTableCellLayout {
+        let ns = source as NSString
+        let open = ns.range(of: "|").location
+        let close = ns.range(of: "|", options: .backwards).location
+        let span = NSRange(location: open + 1, length: close - open - 1)
+        let text = ns.substring(with: span)
+        let trimmedFront = text.count - text.drop(while: { $0 == " " }).count
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        let font = NSFont.systemFont(ofSize: 15)
+        return LiveTableCellLayout.make(
+            attributed: NSAttributedString(string: trimmed, attributes: [.font: font]),
+            sourceLocation: span.location + trimmedFront,
+            width: width,
+            lineHeight: 18,
+            caretRange: span,
+            font: font
+        )
+    }
+
+    @Test func theCaretAdvancesIntoTrailingPadding() throws {
+        let layout = cell("| ab  |")
+        let end = layout.sourceLocation + layout.attributed.length
+        let atText = try #require(layout.caretRect(forOffset: end, alignment: .left))
+        let afterSpace = try #require(layout.caretRect(forOffset: end + 1, alignment: .left))
+        #expect(afterSpace.minX > atText.minX,
+                "a space typed at the end of a cell has to move the caret")
+    }
+
+    @Test func paddingBeforeTheTextCollapsesOntoIt() throws {
+        let layout = cell("|   ab |")
+        let start = try #require(layout.caretRect(forOffset: layout.caretRange.location, alignment: .left))
+        let atText = try #require(layout.caretRect(forOffset: layout.sourceLocation, alignment: .left))
+        #expect(start.minX == atText.minX)
+    }
+
+    /// The measurement underneath it: an advance counts trailing whitespace,
+    /// the inked width must not.
+    @Test func advanceCountsTrailingSpaceAndInkDoesNot() {
+        let font = NSFont.systemFont(ofSize: 15)
+        let bare = NSAttributedString(string: "ab", attributes: [.font: font])
+        let padded = NSAttributedString(string: "ab ", attributes: [.font: font])
+        #expect(LiveTableCellLayout.advance(of: padded) > LiveTableCellLayout.advance(of: bare))
+    }
+}
+
+/// Which side of a soft wrap the caret sits on. The offset is the same
+/// character either way, so only where the caret CAME FROM distinguishes them —
+/// typing rightwards into the break has to stay on the line being filled.
+@Suite("Live table caret affinity")
+struct LiveTableCaretAffinityTests {
+    private func wrapped() -> LiveTableCellLayout {
+        let font = NSFont.systemFont(ofSize: 15)
+        return LiveTableCellLayout.make(
+            attributed: NSAttributedString(
+                string: "einzelunternehmen kleingewerbe anmeldung", attributes: [.font: font]
+            ),
+            sourceLocation: 100, width: 120, lineHeight: 18, font: font
+        )
+    }
+
+    @Test func typingIntoTheBreakStaysOnTheFilledLine() throws {
+        let cell = wrapped()
+        try #require(cell.lineCount > 1)
+        let boundary = cell.sourceLocation + NSMaxRange(cell.lineRanges[0])
+        let down = try #require(cell.caretRect(forOffset: boundary, alignment: .left))
+        let up = try #require(cell.caretRect(forOffset: boundary, alignment: .left, preferUpstream: true))
+        #expect(up.minY < down.minY, "upstream belongs on the earlier line")
+        #expect(up.minX > down.minX, "and at its end, not at the next line's start")
+    }
+
+    /// Without a preference the caret still lands on the line the break spills
+    /// into — that is what keeps ↑ from stepping out of the cell.
+    @Test func theDefaultRemainsDownstream() throws {
+        let cell = wrapped()
+        let boundary = cell.sourceLocation + NSMaxRange(cell.lineRanges[0])
+        let rect = try #require(cell.caretRect(forOffset: boundary, alignment: .left))
+        #expect(rect.minY == cell.lineHeight)
+    }
+
+    /// The upstream caret sits after the last WORD. A wrap that broke on a
+    /// space keeps that space in the line's range, and measuring it would park
+    /// the caret a space out past the text.
+    @Test func upstreamDoesNotOvershootTheLine() throws {
+        let cell = wrapped()
+        let boundary = cell.sourceLocation + NSMaxRange(cell.lineRanges[0])
+        let rect = try #require(cell.caretRect(forOffset: boundary, alignment: .left, preferUpstream: true))
+        let full = LiveTableCellLayout.advance(of: cell.attributed.attributedSubstring(from: cell.lineRanges[0]))
+        #expect(rect.minX <= ceil(full))
+    }
+}
+
+/// ⇧↵ in a cell. A table row is one line of the document, so the break is
+/// written as `<br>`; both forms of the table have to turn it back into a line,
+/// and — the load-bearing half — the row must reserve the taller height, or the
+/// live grid draws over the row below it.
+@Suite("Live table hard breaks")
+struct LiveTableHardBreakTests {
+    private let availableWidth: CGFloat = 650
+
+    private func styled(_ text: String) throws -> (renders: [LiveTableRowRender], layout: MarkdownStyler.TableLayout) {
         _ = NSApplication.shared
-        let text = "| **bold** | b |\n|---|---|\n| 1 | 2 |"
-        let ctx = context(for: text)
+        let font = NSFont.systemFont(ofSize: 15)
+        var ctx = MarkdownStyler.StylingContext(
+            nsText: text as NSString,
+            tokens: MarkdownTokenizer.parseTokensViaAST(in: text),
+            codeTokens: [], activeTokenIndices: [], baseFont: font, layoutBridge: nil,
+            baseDefaultLineHeight: 18, codeBackgroundColor: .windowBackgroundColor,
+            latexMarkerFont: NSFont.systemFont(ofSize: 0.1),
+            configuration: .default, wikiLinkIDProvider: { _ in nil }
+        )
+        ctx.scopeBounds = nil
         let token = try #require(ctx.tokens.first { $0.kind == .table })
         let parsed = try #require(MarkdownStyler.parseTableSource(ctx.nsText.substring(with: token.range)))
-        let tableLayout = MarkdownStyler.measureTable(
-            parsed, baseFont: ctx.baseFont, theme: ctx.configuration.theme,
+        let layout = MarkdownStyler.measureTable(
+            parsed, baseFont: font, theme: ctx.configuration.theme,
             codeBackgroundColor: ctx.codeBackgroundColor, latex: ctx.services.latex,
             availableWidth: availableWidth, extensions: ctx.configuration.extensions
         )
-        let rows = TableCells.rows(in: ctx.nsText, tableRange: token.range)
-        #expect(!MarkdownStyler.canGoLive(
-            layout: tableLayout, rows: rows,
-            availableWidth: availableWidth, text: ctx.nsText,
-            registry: ctx.configuration.extensionRegistry
-        ))
+        var attrs: [StyledRange] = []
+        MarkdownStyler.styleLiveTable(
+            tableRange: token.range, layout: layout,
+            rows: TableCells.rows(in: ctx.nsText, tableRange: token.range),
+            ctx: ctx, attrs: &attrs
+        )
+        return (attrs.compactMap { $0.attributes[.liveTableRow] as? LiveTableRowRender }, layout)
+    }
+
+    @Test func aBreakSplitsTheCellInTwo() throws {
+        let plain = try styled("| a | b |\n|---|---|\n| eins zwei | x |")
+        let broken = try styled("| a | b |\n|---|---|\n| eins<br>zwei | x |")
+        let plainCell = try #require(plain.renders.last?.cells.first)
+        let brokenCell = try #require(broken.renders.last?.cells.first)
+        #expect(plainCell.lineCount == 1)
+        #expect(brokenCell.lineCount == 2)
+    }
+
+    /// The break's markup draws nothing, so it must not widen the cell either.
+    @Test func theMarkupTakesNoWidth() throws {
+        let broken = try styled("| a | b |\n|---|---|\n| eins<br>zwei | x |")
+        let cell = try #require(broken.renders.last?.cells.first)
+        let first = try #require(cell.lineRanges.first)
+        // The `<br>` rides on the line it ends, so that line is longer in
+        // characters than the word it shows.
+        #expect(first.length > 4)
+        let inked = LiveTableCellLayout.advance(of: cell.attributed.attributedSubstring(from: first))
+        let word = LiveTableCellLayout.advance(
+            of: cell.attributed.attributedSubstring(from: NSRange(location: 0, length: 4))
+        )
+        #expect(abs(inked - word) < 0.5, "the markup must add no advance")
+    }
+
+    /// The picture and the live grid have to agree on the row's height, or one
+    /// of them overlaps its neighbour.
+    @Test func theRowReservesTheTallerHeight() throws {
+        let broken = try styled("| a | b |\n|---|---|\n| eins<br>zwei | x |")
+        let total = broken.renders.reduce(0) { $0 + $1.rowHeight }
+        #expect(abs(total - broken.layout.geometry.totalSize.height) < 1.5,
+                "reserved \(total) vs measured \(broken.layout.geometry.totalSize.height)")
+    }
+
+    @Test func onlyRealBreakMarkupCounts() {
+        #expect(TableCells.hardBreaks(in: "a<br>b").count == 1)
+        #expect(TableCells.hardBreaks(in: "a<BR/>b").count == 1)
+        #expect(TableCells.hardBreaks(in: "a<br />b").count == 1)
+        #expect(TableCells.hardBreaks(in: "brand <brand> <br").isEmpty)
+    }
+}
+
+/// The caret after ⇧↵. `make` extends the preceding line's range over the
+/// `<br>` markup (every character must belong to a line, or hit-testing falls
+/// through the gap), which manufactures the exact SHAPE of a soft wrap at an
+/// offset that is not actually ambiguous. Treating it as one made the single
+/// keypress whose purpose is "go to a new line" move the caret nowhere.
+@Suite("Live table hard break caret")
+struct LiveTableHardBreakCaretTests {
+    private func cell(_ text: String) -> LiveTableCellLayout {
+        let font = NSFont.systemFont(ofSize: 15)
+        return LiveTableCellLayout.make(
+            attributed: NSAttributedString(string: text, attributes: [.font: font]),
+            sourceLocation: 100, width: 400, lineHeight: 18, font: font
+        )
+    }
+
+    @Test func pastTheBreakIsAlwaysTheNewLine() throws {
+        let layout = cell("eins<br>zwei")
+        try #require(layout.lineCount == 2)
+        let past = layout.sourceLocation + 8      // just after "eins<br>"
+        // Typing moves the caret forward, which infers upstream affinity — the
+        // right default at a soft wrap and wrong at every hard break.
+        let up = try #require(layout.caretRect(forOffset: past, alignment: .left, preferUpstream: true))
+        let down = try #require(layout.caretRect(forOffset: past, alignment: .left))
+        #expect(up.minY == down.minY, "affinity must not apply across a hard break")
+        #expect(up.minY == layout.lineHeight, "and the answer is the second line")
+        #expect(up.minX == 0)
+    }
+
+    /// A soft wrap must keep its affinity — the earlier fix has to survive.
+    @Test func aSoftWrapStillHonoursAffinity() throws {
+        let layout = cell("einzelunternehmen kleingewerbe anmeldung sofort")
+        let narrow = LiveTableCellLayout.make(
+            attributed: layout.attributed, sourceLocation: 100, width: 120,
+            lineHeight: 18, font: NSFont.systemFont(ofSize: 15)
+        )
+        try #require(narrow.lineCount > 1)
+        #expect(narrow.hardTerminated.isEmpty)
+        let boundary = narrow.sourceLocation + NSMaxRange(narrow.lineRanges[0])
+        let up = try #require(narrow.caretRect(forOffset: boundary, alignment: .left, preferUpstream: true))
+        let down = try #require(narrow.caretRect(forOffset: boundary, alignment: .left))
+        #expect(up.minY < down.minY)
+    }
+
+    @Test func onlyTheBreakLineIsMarked() {
+        let layout = cell("eins<br>zwei")
+        #expect(layout.hardTerminated == [0])
     }
 }

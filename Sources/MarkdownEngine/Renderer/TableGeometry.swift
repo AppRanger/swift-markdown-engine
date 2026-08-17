@@ -31,7 +31,6 @@ enum TableMetrics {
 
 /// Measured layout of one rendered table, in image-local (y-down) points.
 struct TableGeometry: Equatable {
-
     /// Keyed off `ParsedTable.alignments`, which is what `renderTable` sizes by.
     let columnCount: Int
     /// Header + body. **Row 0 is the header**; `ParsedTable.rows[i]` is row `i + 1`.
@@ -47,8 +46,6 @@ struct TableGeometry: Equatable {
     /// `rowCount + 1` y-offsets, same convention downward.
     let rowTop: [CGFloat]
 
-    /// Per-column text width (cell box minus both `cellHPadding`).
-    let columnWidths: [CGFloat]
     /// Per-row text height (cell box minus both `cellVPadding`).
     let rowContentHeights: [CGFloat]
 
@@ -59,7 +56,6 @@ struct TableGeometry: Equatable {
 }
 
 extension TableGeometry {
-
     var bounds: CGRect { CGRect(origin: .zero, size: totalSize) }
 
     /// x just past the outer right border — where a trailing affordance hangs.
@@ -127,21 +123,6 @@ extension TableGeometry {
     func contentRight(_ column: Int) -> CGFloat? {
         guard column >= 0, column < columnCount else { return nil }
         return columnLeft[column + 1] - borderWidth - cellHPadding
-    }
-
-    /// Where a cell's text actually starts, honouring the column's alignment.
-    ///
-    /// The live form needs this as an absolute x because one paragraph cannot
-    /// carry three different alignments — it stays left-aligned and each cell is
-    /// positioned outright.
-    func alignedX(row: Int, column: Int, textWidth: CGFloat) -> CGFloat? {
-        guard row >= 0, row < rowCount,
-              let left = contentLeft(column), let right = contentRight(column) else { return nil }
-        switch alignments[column] {
-        case .left:   return left
-        case .center: return left + max(0, (right - left) - textWidth) / 2
-        case .right:  return right - textWidth
-        }
     }
 }
 
