@@ -521,7 +521,9 @@ enum MarkdownASTStyler {
     }
 
     /// Shared inputs threaded through the walk.
-    private struct Ctx {
+    /// Internal (not private) so per-construct styling can live in its own
+    /// file — see `MarkdownASTStyler+Directives.swift`.
+    struct Ctx {
         let ns: NSString
         let fontName: String
         let baseFont: NSFont
@@ -770,6 +772,18 @@ enum MarkdownASTStyler {
                 styleInlines(children, font: composed, ctx: ctx, into: &attrs)
 
             case .ext(let node):
+                // Directives come through the same node shape under a reserved
+                // id namespace. They compose a font TRANSFORM over the
+                // inherited font and hand it down, so emphasis nested in the
+                // body keeps both (`@font(size: 18){**bold**}` is bold AND
+                // 18pt). Non-directive nodes fall through unchanged.
+                if let bodyFont = directiveBodyFont(for: node, font: font, ctx: ctx, into: &attrs) {
+                    if ctx.isActive(node.range) {
+                        for marker in node.markers { attrs.append((marker, [.foregroundColor: ctx.theme.mutedText])) }
+                    }
+                    styleInlines(node.children, font: bodyFont, ctx: ctx, into: &attrs)
+                    break
+                }
                 // Extension-contributed span: the extension supplies content
                 // ATTRIBUTES only; every range comes from the parser, so a
                 // misbehaving extension can restyle its own span at worst.

@@ -19,12 +19,25 @@ public enum MarkdownHTMLRenderer {
     /// Render `markdown` to an HTML fragment (block elements joined by newlines).
     /// `extensions` render their spans (e.g. `<mark>` for highlight); an
     /// unregistered extension's syntax stays literal text.
-    public static func html(from markdown: String, extensions: [any MarkdownExtension] = []) -> String {
+    public static func html(
+        from markdown: String,
+        extensions: [any MarkdownExtension] = [],
+        directives: [any MarkdownDirective] = [],
+        directiveSettings: DirectiveRegistrySettings = .default
+    ) -> String {
         let ns = markdown as NSString
-        let env = Env(registry: ExtensionRegistry(extensions: extensions),
+        let env = Env(registry: ExtensionRegistry(
+                          extensions: extensions,
+                          directives: DirectiveRegistry(directives: directives, settings: directiveSettings)
+                      ),
                       byID: {
                           var out: [String: any MarkdownExtension] = [:]
                           for ext in extensions { out[ext.id] = ext }
+                          return out
+                      }(),
+                      directivesByID: {
+                          var out: [String: any MarkdownDirective] = [:]
+                          for directive in directives { out[directive.id] = directive }
                           return out
                       }())
         let blocks = DocumentAST.parse(markdown, registry: env.registry)
@@ -36,7 +49,32 @@ public enum MarkdownHTMLRenderer {
     private struct Env {
         let registry: ExtensionRegistry
         let byID: [String: any MarkdownExtension]
+        var directivesByID: [String: any MarkdownDirective] = [:]
         static let empty = Env(registry: .empty, byID: [:])
+
+        /// The directive behind an AST node id, or nil when the node is an
+        /// ordinary extension span.
+        func directive(forNodeID nodeID: String) -> (any MarkdownDirective)? {
+            DirectiveRegistry.directiveID(forNodeID: nodeID).flatMap { directivesByID[$0] }
+        }
+    }
+
+    /// Render a directive node: arguments are recovered from the prefix marker,
+    /// exactly as the styler does, so HTML and on-screen styling can never
+    /// disagree about what was passed.
+    private static func directiveHTML(
+        _ directive: any MarkdownDirective,
+        node: ExtensionInlineNode,
+        bodyHTML: String,
+        ns: NSString
+    ) -> String {
+        let prefix = node.markers.first ?? node.range
+        let arguments = DirectiveArguments(
+            parsing: DirectiveScanner.argumentsRange(inPrefix: prefix, of: ns),
+            in: ns,
+            schema: directive.syntax.parameters
+        )
+        return directive.html(arguments: arguments, bodyHTML: bodyHTML)
     }
 
     // MARK: - Blocks
@@ -231,6 +269,16 @@ public enum MarkdownHTMLRenderer {
             return "<img src=\"\(t)\" alt=\"\(t)\">"
 
         case .ext(let node):
+            // A self-contained directive has no body; a container's body is
+            // its content range.
+            if let directive = env.directive(forNodeID: node.extensionID) {
+                let inner = node.markers.isEmpty
+                    ? ""
+                    : (node.children.isEmpty
+                        ? escape(ns.substring(with: node.contentRange))
+                        : renderInlines(node.children, ns: ns, env: env))
+                return directiveHTML(directive, node: node, bodyHTML: inner, ns: ns)
+            }
             guard let ext = env.byID[node.extensionID] else {
                 return escape(ns.substring(with: node.range))   // unknown id → literal
             }

@@ -23,6 +23,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   contains a span claimed by an earlier pass — a code span or a backslash
   escape — stays literal as a whole; constructs claimed in the same pass or
   later (`$…$`, links, emphasis, nesting) compose normally.
+- **Directive styling**: a container directive's `style` composes over the font
+  inherited at that point in the tree, so `@font(size: 18){**bold**}` is bold
+  AND 18pt rather than one overwriting the other. `FontDirective` and
+  `ColorDirective` ship as opt-in reference directives, off by default like the
+  bundled extensions. `MarkdownHTMLRenderer.html(from:extensions:directives:)`
+  takes the registered set so rich copy matches what is on screen.
 - `NativeTextViewWrapper.onTextMutation` reports exact, completed native edits
   for embedders that maintain their own source authority or mirror edits into
   another presentation.

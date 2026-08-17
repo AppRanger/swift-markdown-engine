@@ -103,6 +103,13 @@ deliberately no "applies to everything after me" form: that would make styling
 depend on document position rather than tree position, breaking both the
 styler's compose-on-descent model and the block-scoped incremental restyle.
 
+Container styling lives in `MarkdownASTStyler+Directives.swift`: it resolves the
+directive, coerces its arguments against the declared schema, and returns the
+composed font the body's children inherit — one more step in the styler's
+existing compose-on-descent walk. `MarkdownHTMLRenderer` recovers arguments from
+the same prefix geometry, so rich copy and on-screen styling cannot disagree
+about what was passed.
+
 `DirectiveScanner` runs from `InlineParser.matchClaimedSpan` after every
 built-in, so a directive can never take text away from core markdown. Matches
 project into the AST as **extension-shaped nodes** (`InlineNode.ext`) under the

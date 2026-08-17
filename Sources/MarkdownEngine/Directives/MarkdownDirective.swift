@@ -183,6 +183,91 @@ public struct DirectiveSyntax: Sendable, Equatable {
     }
 }
 
+// MARK: - Styling result
+
+/// How a directive changes the font of its body. Data, not a closure, so the
+/// transform is inspectable, testable, and cheap in the per-keystroke styling
+/// path — with `custom` as the escape hatch for the rare case.
+public struct DirectiveFontTransform {
+    public enum Size {
+        case absolute(CGFloat)
+        case scale(CGFloat)
+    }
+
+    public var size: Size?
+    public var traits: NSFontTraitMask?
+    public var familyName: String?
+    public var custom: ((NSFont) -> NSFont)?
+
+    public static let inherit = DirectiveFontTransform()
+
+    public init(
+        size: Size? = nil,
+        traits: NSFontTraitMask? = nil,
+        familyName: String? = nil,
+        custom: ((NSFont) -> NSFont)? = nil
+    ) {
+        self.size = size
+        self.traits = traits
+        self.familyName = familyName
+        self.custom = custom
+    }
+
+    /// Compose over the INHERITED font — the whole point. `@font(size: 18)`
+    /// inside a heading keeps the heading's bold; `**bold**` inside the body
+    /// keeps 18pt.
+    public func apply(to font: NSFont, manager: NSFontManager = .shared) -> NSFont {
+        var result = font
+        if let familyName {
+            result = NSFont(name: familyName, size: result.pointSize) ?? result
+        }
+        switch size {
+        case .absolute(let points): result = manager.convert(result, toSize: points)
+        case .scale(let factor):    result = manager.convert(result, toSize: result.pointSize * factor)
+        case nil:                   break
+        }
+        if let traits { result = manager.convert(result, toHaveTrait: traits) }
+        if let custom { result = custom(result) }
+        return result
+    }
+}
+
+/// What a container directive does to its body.
+public struct DirectiveStyle {
+    public var font: DirectiveFontTransform
+    /// Non-font attributes for the body range (background, colour, kern…).
+    public var attributes: [NSAttributedString.Key: Any]
+
+    public static let inherit = DirectiveStyle()
+
+    public init(
+        font: DirectiveFontTransform = .inherit,
+        attributes: [NSAttributedString.Key: Any] = [:]
+    ) {
+        self.font = font
+        self.attributes = attributes
+    }
+}
+
+/// Everything a directive may read while deciding how to present itself.
+/// Read-only by construction — a directive cannot reach the text storage.
+public struct DirectiveContext {
+    public let theme: MarkdownEditorTheme
+    /// Font inherited at the directive's position (heading font inside a
+    /// heading, body font in a paragraph).
+    public let inheritedFont: NSFont
+    /// True when the caret is inside the directive — source is revealed.
+    public let isActive: Bool
+    public let marker: Character
+
+    public init(theme: MarkdownEditorTheme, inheritedFont: NSFont, isActive: Bool, marker: Character) {
+        self.theme = theme
+        self.inheritedFont = inheritedFont
+        self.isActive = isActive
+        self.marker = marker
+    }
+}
+
 // MARK: - The protocol
 
 /// An embedder-contributed inline command. Register instances via
@@ -193,6 +278,10 @@ public protocol MarkdownDirective: Sendable {
     /// Used for dispatch and cache keying — never shown to users.
     var id: String { get }
     var syntax: DirectiveSyntax { get }
+
+    /// Container form: how the body is styled. Ignored for self-contained.
+    /// Called during styling; must be cheap and synchronous.
+    func style(arguments: DirectiveArguments, context: DirectiveContext) -> DirectiveStyle
 
     /// Clean-copy path. `bodyHTML` is already escaped / recursively rendered
     /// (empty for self-contained).
@@ -205,6 +294,8 @@ public extension MarkdownDirective {
     // misspells `syntax` compiles fine and yields an inert directive. If your
     // command never fires, check that name first.
     var id: String { syntax.name }
+
+    func style(arguments: DirectiveArguments, context: DirectiveContext) -> DirectiveStyle { .inherit }
 
     func html(arguments: DirectiveArguments, bodyHTML: String) -> String {
         bodyHTML.isEmpty

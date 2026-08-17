@@ -26,6 +26,7 @@ checkboxes.
 
 - **Live Markdown styling** — bold, italic, headings, lists, blockquotes, GFM tables, code, links, task checkboxes, horizontal rules
 - **Extensions** — opt-in constructs beyond CommonMark (`==highlight==`, `~~strikethrough~~`, …); add your own via [`MarkdownExtension`](#extensions)
+- **Directives** — opt-in inline commands with typed arguments (`@font(size: 18){text}`); add your own via [`MarkdownDirective`](#directives)
 - **Wiki-style linking** with two-form storage / display roundtripping
   (`[[Name|<id>]]` ↔ `[[Name]]`)
 - **Image embeds** — both `![[Name]]` (Obsidian-style, embedder supplies the                           
@@ -140,6 +141,35 @@ attributes for its content and an HTML wrapper for rich copy. The parser owns
 all geometry, marker/fence hiding, caret reveal, and incremental restyling, so
 extensions behave identically to built-ins and cannot affect neighboring
 constructs. Conform to `MarkdownExtension` to add your own.
+
+### Directives
+
+The second opt-in seam, for constructs that need a NAME and TYPED ARGUMENTS
+rather than delimiters:
+
+```swift
+var config = MarkdownEditorConfiguration()
+config.directives = [FontDirective(), ColorDirective()]
+```
+
+```markdown
+@font(size: 18){eighteen point}, @font(size: 1.5em){half again}, @color(red){tinted}
+```
+
+Two forms: **self-contained** (`@pagebreak`) and **container**
+(`@font(size: 18){text}`). A container's font transform composes over the font
+inherited at that point in the tree, so `@font(size: 18){**bold**}` is bold
+*and* 18pt, and the same call inside a heading keeps the heading's weight.
+There is no "applies to everything after me" form — a directive's effect is
+scoped to its own node, which is what keeps per-keystroke restyling
+block-local.
+
+The marker defaults to `@` and is configurable per registry
+(`config.directiveSettings`) and per directive, and several markers can be
+registered at once. An unregistered name stays literal text, and a directive
+only opens at a non-word character — so `name@example.com` is never a
+directive. Conform to `MarkdownDirective` to add your own; a typical one is
+about 30 lines, including its argument schema and HTML.
 
 ### Code Blocks
 
