@@ -87,6 +87,7 @@ extension NativeTextView {
     /// a selection, or a click that never entered a table is left alone.
     func resolvePendingLiveTableClick() {
         guard let pending = pendingLiveTableClick else { return }
+        applyPendingLiveTableScrollSeed()
         // Wait for the restyle the click itself triggered. Judged on WHICH table
         // is live, not on whether any is: moving the caret from one table to
         // another leaves the old one's rows stamped for a moment, and "some table
@@ -125,6 +126,8 @@ extension NativeTextView {
             liveTableCaretHint = (offset, offset > lastLiveTableCaretOffset)
         }
         lastLiveTableCaretOffset = offset
+        applyPendingLiveTableScrollSeed()
+        revealLiveTableCaret()
         guard let indicator = subviews.first(where: { type(of: $0) == NSTextInsertionIndicator.self }) else {
             return
         }

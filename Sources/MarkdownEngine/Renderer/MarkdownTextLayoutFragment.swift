@@ -157,7 +157,16 @@ final class MarkdownTextLayoutFragment: NSTextLayoutFragment {
     /// fragment's top, so paragraph spacing above it is not counted twice.
     private func liveTableRowOrigin(at point: CGPoint) -> CGPoint {
         let top = textLineFragments.first?.typographicBounds.origin.y ?? 0
-        return CGPoint(x: point.x, y: point.y + top)
+        return CGPoint(x: point.x - liveTableScrollX, y: point.y + top)
+    }
+
+    /// How far the live table is scrolled right, or 0 when it fits.
+    var liveTableScrollX: CGFloat {
+        guard let view = textLayoutManager?.textContainer?.textView as? NativeTextView,
+              let render = liveTableRowRender,
+              let width = textLayoutManager?.textContainer?.size.width,
+              render.geometry.totalSize.width > width + 0.5 else { return 0 }
+        return view.liveTableScrollX
     }
 
     private func drawLiveTableRow(at point: CGPoint) {
@@ -167,7 +176,20 @@ final class MarkdownTextLayoutFragment: NSTextLayoutFragment {
         func alignToPixel(_ value: CGFloat) -> CGFloat {
             (value * scale).rounded(.toNearestOrAwayFromZero) / scale
         }
-        render.draw(at: liveTableRowOrigin(at: point), pixelAlign: alignToPixel)
+        let origin = liveTableRowOrigin(at: point)
+        // A table wider than the column is scrolled, so it has to be cut off at
+        // the column's edge — otherwise its far columns paint over the margin
+        // and, in a centred reading column, over whatever sits beside it.
+        guard let width = textLayoutManager?.textContainer?.size.width,
+              render.geometry.totalSize.width > width + 0.5 else {
+            render.draw(at: origin, pixelAlign: alignToPixel)
+            return
+        }
+        NSGraphicsContext.saveGraphicsState()
+        NSBezierPath(rect: CGRect(x: point.x, y: origin.y,
+                                  width: width, height: render.rowHeight)).setClip()
+        render.draw(at: origin, pixelAlign: alignToPixel)
+        NSGraphicsContext.restoreGraphicsState()
     }
 
     // MARK: - Helpers

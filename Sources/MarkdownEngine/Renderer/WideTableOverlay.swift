@@ -159,6 +159,27 @@ final class WideTableImageView: NSImageView {
             return
         }
         textView.window?.makeFirstResponder(textView)
+        // Hand the picture's scroll position to the grid BEFORE the caret moves:
+        // placing the caret is what turns the table live, and the grid reads the
+        // seed as it does so.
+        textView.pendingLiveTableScrollSeed = overlay.horizontalOffset
+        // Where the click actually landed, so the caret ends up in THAT cell.
+        // The anchor below is the table's first cell, which is the only offset
+        // that exists before the grid does — and on a table scrolled right it is
+        // off screen, so the caret reveal would drag the view back to column 1
+        // and undo the seed. The pending click is re-aimed once the grid is
+        // laid out, by the same path a click in the text takes.
+        //
+        // Overlay space, not image space: the overlay IS the visible box, so its
+        // own coordinates already have the horizontal scroll taken out — exactly
+        // what the grid's hit test expects.
+        let inOverlay = overlay.convert(event.locationInWindow, from: nil)
+        let containerOrigin = textView.textContainerOrigin
+        textView.pendingLiveTableClick = (
+            point: CGPoint(x: overlay.frame.origin.x - containerOrigin.x + inOverlay.x,
+                           y: overlay.frame.origin.y - containerOrigin.y + inOverlay.y),
+            signature: textView.liveTableSignature
+        )
         textView.setSelectedRange(NSRange(location: location, length: 0))
     }
 }
@@ -223,8 +244,11 @@ extension NativeTextView {
 
         let containerWidth = container.size.width
         guard containerWidth.isFinite, containerWidth > 0 else { return }
-        // Breakout: tables span full width, flush with the text column's left.
-        let breakout = configuration.readingWidth != nil
+        // A wide table stays INSIDE the text column and scrolls within it. It
+        // used to break out to the full window width whenever a reading column
+        // was configured, which is the one thing a reading column exists to
+        // prevent — the table was the only block allowed past the measure.
+        let breakout = false
         // Breakout host: the full-width reading-column container, else the text view itself.
         let host: NSView = breakout ? (superview ?? self) : self
         let viewWidth = host.bounds.width

@@ -25,6 +25,21 @@ final class NativeTextView: NSTextView {
     var pendingFullLayoutMeasure = false
     /// Coalesces wide-table overlay updates to once per runloop (resize fires many per frame).
     var pendingWideTableOverlayUpdate = false
+    /// Horizontal scroll of the LIVE table, in points from its left edge.
+    /// One value, not a table: exactly one table is live at a time, because
+    /// being live means the caret is inside it. Reset when the live table
+    /// changes; seeded from the picture's own offset so clicking one does not
+    /// jump it back to column 1.
+    var liveTableScrollX: CGFloat = 0
+    /// Which table `liveTableScrollX` belongs to, so it resets when another
+    /// table goes live instead of carrying one table's offset into the next.
+    var lastLiveTableScrollSignature: Int = -1
+    /// Where the PICTURE was scrolled to when the caret was placed into it.
+    /// The picture and the grid are two different views of one table with two
+    /// separate offsets; without handing this over, clicking a table you had
+    /// scrolled right opens the grid at column 1 and throws you back to the
+    /// start of the row you were reading.
+    var pendingLiveTableScrollSeed: CGFloat?
     var suppressAutoRevealOnce: Bool = false
     // Set by clickedOnLink during a mouseDown: did the delegate fire (so
     // mouseDown can re-dispatch a click AppKit dropped), and did it navigate

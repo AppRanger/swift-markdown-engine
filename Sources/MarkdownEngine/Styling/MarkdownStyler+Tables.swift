@@ -28,6 +28,43 @@ extension MarkdownStyler {
     /// only on its source, font, colors, and appearance — so identical keys can
     /// reuse the whole render instead of re-measuring and re-rasterizing every
     /// inactive table on every keystroke.
+    /// Column widths of the table being edited, held still for as long as it is.
+    ///
+    /// Measuring per keystroke re-derives every column from its content, so
+    /// typing one character widened its column and shoved everything to the
+    /// right of it sideways — under a fixed horizontal scroll that reads as the
+    /// table sliding away while you type. Frozen, a growing cell wraps and its
+    /// row gets taller instead, which is the direction that does not move what
+    /// you are looking at.
+    ///
+    /// One slot, because exactly one table is live at a time. Re-measured when
+    /// the STRUCTURE changes (a row or column added) or the column resizes, never
+    /// when only the text does. Leaving the table drops back to the picture,
+    /// which is rendered fresh — so the frozen widths never outlive the edit.
+    private struct FrozenLiveTableKey: Equatable {
+        let location: Int
+        let rows: Int
+        let columns: Int
+        let availableWidth: CGFloat
+    }
+    private static var frozenLiveTable: (key: FrozenLiveTableKey, layout: TableLayout)?
+
+    static func frozenLiveTableLayout(
+        at location: Int,
+        rows: Int,
+        columns: Int,
+        availableWidth: CGFloat,
+        measure: () -> TableLayout
+    ) -> TableLayout {
+        let key = FrozenLiveTableKey(
+            location: location, rows: rows, columns: columns, availableWidth: availableWidth
+        )
+        if let frozen = frozenLiveTable, frozen.key == key { return frozen.layout }
+        let layout = measure()
+        frozenLiveTable = (key, layout)
+        return layout
+    }
+
     private static let tableRenderCache: NSCache<NSString, RenderedTable> = {
         let cache = NSCache<NSString, RenderedTable>()
         // Must exceed a document's unique-table count or a full restyle (load /
@@ -236,15 +273,22 @@ extension MarkdownStyler {
                 // Measure only — never rasterize the active table: its source
                 // changes on every keystroke, so each one would insert a
                 // throwaway image and evict genuinely reused cache entries.
-                let layout = measureTable(
-                    parsed,
-                    baseFont: ctx.baseFont,
-                    theme: ctx.configuration.theme,
-                    codeBackgroundColor: ctx.codeBackgroundColor,
-                    latex: ctx.services.latex,
-                    availableWidth: availableWidth,
-                    extensions: ctx.configuration.extensions
-                )
+                let layout = frozenLiveTableLayout(
+                    at: token.range.location,
+                    rows: rows.count,
+                    columns: parsed.alignments.count,
+                    availableWidth: availableWidth
+                ) {
+                    measureTable(
+                        parsed,
+                        baseFont: ctx.baseFont,
+                        theme: ctx.configuration.theme,
+                        codeBackgroundColor: ctx.codeBackgroundColor,
+                        latex: ctx.services.latex,
+                        availableWidth: availableWidth,
+                        extensions: ctx.configuration.extensions
+                    )
+                }
                 let refusal = liveTableRefusal(
                     layout: layout,
                     rows: rows,

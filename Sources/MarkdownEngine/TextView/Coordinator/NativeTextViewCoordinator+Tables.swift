@@ -137,3 +137,56 @@ extension NativeTextViewCoordinator {
         return rect
     }
 }
+
+extension NativeTextViewCoordinator {
+
+    /// A ⌫/⌦ that eats into a table from its EDGE selects the whole table; the
+    /// press after that deletes it. Returns true when the press was spent on the
+    /// selection.
+    ///
+    /// Only from the edge. A target strictly inside the source is someone
+    /// editing a cell, and there a character at a time is exactly right.
+    ///
+    /// The edge is what makes this necessary: the table's source is collapsed
+    /// onto one anchor character, so deleting into it from the line below takes
+    /// hidden characters away one at a time and nothing visibly happens until
+    /// the source stops parsing as a table. Judging "picture, not grid" instead
+    /// cannot work — touching the edge with the caret is what turns the table
+    /// live in the first place, so that test is false in every case it is meant
+    /// to catch.
+    ///
+    /// The terminator on the far side counts as the edge too: the caret sits at
+    /// the start of the line below a table far more often than exactly at its
+    /// last character.
+    ///
+    /// The selection is an ORDINARY one, and AppKit highlights it the ordinary
+    /// way — a bar per source line, each the full width of the text container.
+    /// Marking the drawn table instead is not reachable from here: measured, a
+    /// selection segment spans the container whatever the line box is set to
+    /// (650pt against an 83pt table, with the line box clamped to 83), so it
+    /// would take drawing the highlight in the layout fragment and suppressing
+    /// AppKit's own.
+    func selectTableForWholeDeletion(textView: NSTextView, forward: Bool) -> Bool {
+        guard textView.isEditable, let storage = textView.textStorage else { return false }
+        let selection = textView.selectedRange()
+        // A selection is already the visible target — let it be deleted.
+        guard selection.length == 0 else { return false }
+
+        let target = forward ? selection.location : selection.location - 1
+        guard target >= 0, target < storage.length else { return false }
+
+        // Cached per document version, so this costs a dictionary hit.
+        let tables = parsedDocument(for: textView.string).classified.table
+        guard let table = tables.first(where: { candidate in
+            let range = candidate.token.range
+            return forward
+                ? (target == range.location || target == range.location - 1)
+                : (target == NSMaxRange(range) - 1 || target == NSMaxRange(range))
+        }) else { return false }
+
+        let range = table.token.range
+        guard NSMaxRange(range) <= storage.length else { return false }
+        textView.setSelectedRange(range)
+        return true
+    }
+}

@@ -53,12 +53,6 @@ extension MarkdownStyler {
 
         // Wrapping rows are supported: the fragment draws each cell itself, so
         // a tall cell simply makes its row taller.
-        // A table wider than the column is hosted in a scrolling image view;
-        // there is no live analogue for that yet.
-        if geometry.totalSize.width > availableWidth + 0.5 {
-            return .widerThanContainer(tableWidth: geometry.totalSize.width, available: availableWidth)
-        }
-
         for row in rows {
             // A surplus cell is truncated away by the parser, and the live form
             // cannot delete characters to match.

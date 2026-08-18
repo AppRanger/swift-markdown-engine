@@ -249,13 +249,17 @@ struct TableLiveLayoutTests {
         ))
     }
 
-    /// A table wider than the container keeps the horizontal-scroll image.
-    @Test func refusesATableWiderThanTheContainer() throws {
+    /// A table wider than the container goes live like any other and is panned
+    /// inside the column. It used to refuse and drop to raw pipes, because the
+    /// only wide form was a picture in a scroll view — so clicking the one kind
+    /// of table hardest to read showed markup instead of the table.
+    @Test func goesLiveEvenWiderThanTheContainer() throws {
         let header = (0..<14).map { "spaltenüberschrift\($0)" }.joined(separator: " | ")
         let delim = (0..<14).map { _ in "---" }.joined(separator: "|")
         let body = (0..<14).map { "sehrlangerzellenwert\($0)" }.joined(separator: " | ")
         let styled = try styleLive("| \(header) |\n|\(delim)|\n| \(body) |", width: 300)
-        #expect(!MarkdownStyler.canGoLive(
+        #expect(styled.layout.geometry.totalSize.width > 300, "test table must actually overflow")
+        #expect(MarkdownStyler.canGoLive(
             layout: styled.layout, rows: styled.rows, availableWidth: 300,
             text: styled.text, registry: MarkdownEditorConfiguration.default.extensionRegistry
         ))

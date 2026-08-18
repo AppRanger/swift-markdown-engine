@@ -30,6 +30,15 @@ enum MarkdownDetection {
                 indices.insert(index)
                 continue
             }
+            // A table the selection swallows WHOLE stays a picture, so the
+            // whole drawn table is marked. Live, every row is its own hidden
+            // line and the last row's selection segment measures zero wide —
+            // which is why marking a table used to cover the header and leave
+            // the body row and its empty cell unmarked.
+            if selectionRange.length > 0, token.kind == .table,
+               selectionRange.location <= start, NSMaxRange(selectionRange) >= end {
+                continue
+            }
             if caretLocation >= start && caretLocation < end {
                 indices.insert(index)
                 continue

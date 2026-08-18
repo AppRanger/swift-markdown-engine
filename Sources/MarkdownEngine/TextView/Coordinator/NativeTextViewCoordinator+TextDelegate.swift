@@ -959,13 +959,18 @@ extension NativeTextViewCoordinator {
         // newline through and split the table in two.
         // ⌫ / ⌦ over a hard break removes all four characters at once.
         if commandSelector == #selector(NSResponder.deleteBackward(_:))
-            || commandSelector == #selector(NSResponder.deleteForward(_:)),
-           let view = textView as? NativeTextView,
-           view.isCaretInLiveTable,
-           view.deleteLiveTableHardBreak(
-               forward: commandSelector == #selector(NSResponder.deleteForward(_:))
-           ) {
-            return true
+            || commandSelector == #selector(NSResponder.deleteForward(_:)) {
+            let forward = commandSelector == #selector(NSResponder.deleteForward(_:))
+            if let view = textView as? NativeTextView,
+               view.isCaretInLiveTable,
+               view.deleteLiveTableHardBreak(forward: forward) {
+                return true
+            }
+            // Deleting into a table from its edge takes the whole table, not
+            // one hidden character at a time.
+            if selectTableForWholeDeletion(textView: textView, forward: forward) {
+                return true
+            }
         }
         let event = NSApp.currentEvent
         let shiftHeld = event?.type == .keyDown
