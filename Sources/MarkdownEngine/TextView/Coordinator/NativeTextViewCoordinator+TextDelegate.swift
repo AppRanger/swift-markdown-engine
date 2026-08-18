@@ -926,6 +926,15 @@ extension NativeTextViewCoordinator {
                 return false
             }
 
+            if MarkdownInputHandler.handleTableCellNewline(
+                textView: textView,
+                affectedCharRange: affectedCharRange,
+                replacementString: replacementString,
+                tableTokens: parsed.tableTokens
+            ) {
+                return false
+            }
+
             return MarkdownInputHandler.handleListInsertion(textView: textView, affectedCharRange: affectedCharRange,
                                                             replacementString: replacementString, codeTokens: parsed.codeTokens)
         }
