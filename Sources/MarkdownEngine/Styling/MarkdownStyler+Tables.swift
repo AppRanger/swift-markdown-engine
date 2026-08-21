@@ -310,13 +310,37 @@ extension MarkdownStyler {
         return ParsedTable(header: paddedHeader, alignments: paddedAlign, rows: rows)
     }
 
+    /// Splits on UNESCAPED `|` only. GFM escapes the delimiter as `\\|`, and
+    /// the escape wins over every inline context (a table row is split before
+    /// inline parsing runs) — so a cell holding `` `a \\| b` `` is one cell, not
+    /// two. Splitting on the raw character silently truncated such a row to the
+    /// header's column count.
     private static func parseTableRow(_ line: String) -> [String] {
-        var s = line.trimmingCharacters(in: .whitespaces)
-        if s.hasPrefix("|") { s.removeFirst() }
-        if s.hasSuffix("|") { s.removeLast() }
-        return s.split(separator: "|", omittingEmptySubsequences: false).map {
-            $0.trimmingCharacters(in: .whitespaces)
+        var s = Substring(line.trimmingCharacters(in: .whitespaces))
+        if s.hasPrefix("|") { s = s.dropFirst() }
+        if s.hasSuffix("|"), !s.dropLast().hasSuffix("\\") { s = s.dropLast() }
+
+        var cells: [String] = []
+        var current = ""
+        var escaped = false
+        for ch in s {
+            if escaped {
+                // Only the delimiter escape is resolved here; every other `\x`
+                // stays intact so inline parsing still owns its own escapes.
+                if ch == "|" { current.append("|") } else { current.append("\\"); current.append(ch) }
+                escaped = false
+            } else if ch == "\\" {
+                escaped = true
+            } else if ch == "|" {
+                cells.append(current.trimmingCharacters(in: .whitespaces))
+                current = ""
+            } else {
+                current.append(ch)
+            }
         }
+        if escaped { current.append("\\") }
+        cells.append(current.trimmingCharacters(in: .whitespaces))
+        return cells
     }
 
     private static func parseTableAlignments(_ line: String) -> [TableAlignment] {
@@ -334,6 +358,16 @@ extension MarkdownStyler {
     }
 
     // MARK: - Inline-formatted cell strings
+
+    /// `<br>` → a real newline. A GFM row IS one source line, so `<br>` is the
+    /// only in-cell line break the format has; without this it drew literally.
+    static func expandCellLineBreaks(_ raw: String) -> String {
+        raw.replacingOccurrences(
+            of: #"<br\s*/?>"#,
+            with: "\n",
+            options: [.regularExpression, .caseInsensitive]
+        )
+    }
 
     /// Raw cell → `NSAttributedString`: inline markdown applied, markers stripped, LaTeX as attachments.
     static func formattedCellString(
@@ -354,6 +388,9 @@ extension MarkdownStyler {
         let out = NSMutableAttributedString()
         var extensionsByID: [String: any MarkdownExtension] = [:]
         for ext in extensions { extensionsByID[ext.id] = ext }
+        // Substituted BEFORE inline parsing so the AST offsets index the same
+        // string that gets drawn.
+        let raw = expandCellLineBreaks(raw)
         appendInlineCell(
             InlineParser.parse(raw, registry: ExtensionRegistry(extensions: extensions)),
             in: raw as NSString, into: out,
@@ -528,8 +565,17 @@ extension MarkdownStyler {
         }
         var maxWidths = [CGFloat](repeating: minColumnContentWidth, count: columnCount)
         var minWidths = [CGFloat](repeating: minColumnContentWidth, count: columnCount)
+        // `size()` lays a cell out as ONE line, so a cell broken by `<br>`
+        // would report the sum of its lines as its natural width.
+        func naturalWidth(_ cell: NSAttributedString) -> CGFloat {
+            guard cell.string.contains("\n") else { return ceil(cell.size().width) }
+            return ceil(cell.boundingRect(
+                with: NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude),
+                options: [.usesLineFragmentOrigin]
+            ).width)
+        }
         func considerCell(_ cell: NSAttributedString, col: Int) {
-            maxWidths[col] = max(maxWidths[col], ceil(cell.size().width))
+            maxWidths[col] = max(maxWidths[col], naturalWidth(cell))
             minWidths[col] = max(minWidths[col], widestUnbreakableSegment(cell))
         }
         for (i, cell) in headerCells.enumerated() where i < columnCount {
