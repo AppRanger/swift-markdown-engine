@@ -38,6 +38,7 @@ public struct MarkdownEditorConfiguration: Sendable {
     public var blockLatex: BlockLatexStyle
     public var inlineLatex: InlineLatexStyle
     public var blockquote: BlockquoteStyle
+    public var thematicBreak: ThematicBreakStyle
     public var link: LinkStyle
     public var paragraph: ParagraphStyle
     public var overscroll: OverscrollPolicy
@@ -104,6 +105,7 @@ public struct MarkdownEditorConfiguration: Sendable {
         blockLatex: BlockLatexStyle = .default,
         inlineLatex: InlineLatexStyle = .default,
         blockquote: BlockquoteStyle = .default,
+        thematicBreak: ThematicBreakStyle = .default,
         link: LinkStyle = .default,
         paragraph: ParagraphStyle = .default,
         overscroll: OverscrollPolicy = .default,
@@ -132,6 +134,7 @@ public struct MarkdownEditorConfiguration: Sendable {
         self.blockLatex = blockLatex
         self.inlineLatex = inlineLatex
         self.blockquote = blockquote
+        self.thematicBreak = thematicBreak
         self.link = link
         self.paragraph = paragraph
         self.overscroll = overscroll
@@ -352,6 +355,98 @@ public struct TaskCheckboxStyle: Sendable {
     }
 
     public static let `default` = TaskCheckboxStyle()
+}
+
+// MARK: - Thematic breaks
+
+/// How each thematic-break marker draws.
+///
+/// CommonMark gives `---`, `***` and `___` one meaning and one rendering — a
+/// horizontal rule. The marker character survives into this struct so an
+/// embedder can give one of the three a different look without inventing
+/// syntax: a novel-style star divider on `***`, say, while `---` stays a rule.
+/// Every marker still parses as a thematic break and still exports as `<hr>`,
+/// so a document written this way reads correctly in any other editor.
+///
+/// A nil mark (the default for all three) draws the full-width rule. A non-nil
+/// mark is drawn CENTERED in the text container instead, in the body font, and
+/// the source characters stay hidden the way they already are — put a literal
+/// string here (`"* * *"`), not a symbol name. Pick one whose glyphs exist in
+/// EVERY font you ship: a glyph the body font lacks does not draw as tofu, it
+/// silently falls back to another typeface — `⁂` asked for in a serif lands as
+/// Helvetica mid-page — and the engine cannot tell that from a deliberate
+/// choice. An ASCII `*` is the safe end of that spectrum.
+///
+/// The mark is presentation only. The source text is untouched, the caret
+/// still reveals the raw `***` when it enters the line, and copy, export and
+/// find all see the original characters.
+public struct ThematicBreakStyle: Sendable {
+
+    /// A centered mark and the size it draws at.
+    ///
+    /// `scale` is a multiple of the body font size, so a mark keeps its
+    /// proportion when the reader changes the editor's font size. Above 1 the
+    /// break's line grows to fit, rather than the mark overlapping the
+    /// paragraphs around it.
+    ///
+    /// The mark is centered on its INK, not on its layout box. An asterisk is
+    /// drawn high in its em — its optical center sits about a quarter of the
+    /// font size above the lowercase center, and that gap grows with the size
+    /// — so box-centering would let the mark drift toward the top of the line
+    /// as it got bigger. Ink-centering holds it at the optical center of the
+    /// break at any scale, in any font, with no per-font tuning.
+    ///
+    /// A bare string literal works wherever a `Mark` is expected:
+    /// `config.thematicBreak.asteriskMark = "* * *"` is scale 1.
+    public struct Mark: Sendable, Equatable, ExpressibleByStringLiteral {
+        /// The literal text drawn, e.g. `"* * *"`.
+        public var text: String
+        /// Multiple of the body font size. 1 draws at body size.
+        public var scale: CGFloat
+
+        public init(_ text: String, scale: CGFloat = 1) {
+            self.text = text
+            self.scale = max(0.01, scale)
+        }
+
+        public init(stringLiteral value: String) {
+            self.init(value)
+        }
+    }
+
+    /// Centered mark drawn for a `---` break; nil draws the full-width rule.
+    public var dashMark: Mark?
+    /// Centered mark drawn for a `***` break; nil draws the full-width rule.
+    public var asteriskMark: Mark?
+    /// Centered mark drawn for a `___` break; nil draws the full-width rule.
+    public var underscoreMark: Mark?
+
+    public init(
+        dashMark: Mark? = nil,
+        asteriskMark: Mark? = nil,
+        underscoreMark: Mark? = nil
+    ) {
+        self.dashMark = dashMark
+        self.asteriskMark = asteriskMark
+        self.underscoreMark = underscoreMark
+    }
+
+    public static let `default` = ThematicBreakStyle()
+}
+
+extension ThematicBreakStyle {
+    /// The mark configured for a marker character, or nil to draw the rule.
+    /// The parser has already proven the character is one of the three
+    /// (`BlockParser.isThematicBreak`), so `default` is unreachable in practice
+    /// and falls back to the rule rather than guessing.
+    func mark(forMarker marker: unichar) -> Mark? {
+        switch marker {
+        case 0x2D: return dashMark        // -
+        case 0x2A: return asteriskMark    // *
+        case 0x5F: return underscoreMark  // _
+        default: return nil
+        }
+    }
 }
 
 // MARK: - Headings

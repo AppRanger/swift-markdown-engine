@@ -32,6 +32,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `NativeTextViewWrapper.onTextMutation` reports exact, completed native edits
   for embedders that maintain their own source authority or mirror edits into
   another presentation.
+- `MarkdownEditorConfiguration.thematicBreak` (`ThematicBreakStyle`) gives each
+  thematic-break marker its own look. CommonMark treats `---`, `***` and `___`
+  as one construct with one rendering, so an embedder who wanted a novel-style
+  star divider on `***` had no way to ask for one without inventing syntax.
+  Setting `asteriskMark` draws that string centred in the text container in
+  place of the full-width rule; `dashMark` and `underscoreMark` do the same for
+  their markers. All three default to nil, so every existing embedder keeps the
+  rule it already has. Presentation only — the source text is untouched, the
+  caret still reveals the raw `***`, the construct still exports as `<hr>`, and
+  a document written this way reads correctly in any other editor. The mark is
+  a literal string rather than a symbol name, so pick one whose glyphs exist in
+  every font you ship: a glyph the body font lacks does not draw as tofu, it
+  silently falls back to another typeface (`⁂` asked for in a serif renders as
+  Helvetica), and the engine cannot tell that from a deliberate choice. A mark carries a `scale` (a multiple of the
+  body font size, 1 by default), and above 1 the break's line grows to fit
+  rather than the mark overlapping its neighbours. Marks are centred on their
+  INK rather than their layout box, because a glyph like `*` is drawn high in
+  its em — its optical centre sits about a quarter of the font size above the
+  lowercase centre, and that gap grows with the size, so box-centring would let
+  a larger mark climb toward the top of its line.
 
 ### Changed
 - An ordered list's painted number no longer reverts to the source digit under

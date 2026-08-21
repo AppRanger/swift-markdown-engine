@@ -9,6 +9,7 @@
 //  via NSTextLayoutFragment instead of NSLayoutManager glyph overrides.
 
 import AppKit
+import CoreText
 
 // MARK: - Custom attribute keys for rendering overlays
 
@@ -18,6 +19,13 @@ extension NSAttributedString.Key {
     static let latexIsBlock = NSAttributedString.Key("LatexIsBlock")
     static let latexBlockOffsetY = NSAttributedString.Key("LatexBlockOffsetY")
     static let thematicBreak = NSAttributedString.Key("ThematicBreak")
+    /// String — the mark to draw CENTERED in place of the full-width rule on a
+    /// line that already carries `.thematicBreak`. Absent means the rule. The
+    /// styler resolves it from `configuration.thematicBreak`, so the fragment
+    /// draws what it is told and never re-reads the marker character.
+    static let thematicBreakMark = NSAttributedString.Key("ThematicBreakMark")
+    /// CGFloat — the mark's size as a multiple of the body font. Absent = 1.
+    static let thematicBreakMarkScale = NSAttributedString.Key("ThematicBreakMarkScale")
     /// Int nesting level (1-based) of a blockquote line; the fragment
     /// paints that many vertical bars in the left gutter.
     static let blockquoteLevel = NSAttributedString.Key("BlockquoteLevel")
@@ -484,12 +492,30 @@ final class MarkdownTextLayoutFragment: NSTextLayoutFragment {
 
     // MARK: - Thematic Breaks (---, ***, ___)
 
-    /// Draw a 1pt horizontal rule across the full container width for any
-    /// line fragment whose backing text carries the `.thematicBreak`
-    /// attribute. This decouples HR rendering from the source-text length,
-    /// so a 3-char `---` looks the same as a 80-char auto-expanded line.
-    private func drawThematicBreaks(at point: CGPoint, in context: CGContext) {
-        guard let ts = textStorage, let range = fragmentNSRange, range.length > 0 else { return }
+    /// One thematic-break line's decoration. `mark == nil` is the default
+    /// rule and `rect` is the band to fill; otherwise `rect` is the box the
+    /// mark string draws into, already centered in the text container.
+    /// `rect` is what the reader sees: the rule's band, or the mark's INK box
+    /// (not its layout box — see `ThematicBreakStyle.Mark`). `drawOrigin` is
+    /// where the string is actually drawn to land that ink there.
+    struct ThematicBreakDecoration {
+        let rect: CGRect
+        let mark: String?
+        let font: NSFont
+        let drawOrigin: CGPoint
+    }
+
+    /// Geometry for every thematic break in this fragment, in the same
+    /// fragment-local space `draw(at:)` works in. Split out from the drawing so
+    /// centering is assertable headlessly, the way `blockBackgroundFills(at:)`
+    /// is — nothing here touches a graphics context.
+    ///
+    /// The rule spans the full container width regardless of how many source
+    /// characters produced it, so a 3-char `---` matches an 80-char one. A mark
+    /// is measured in the view's BASE font, not the run's: the run carries the
+    /// hidden-marker styling that makes the source characters invisible.
+    func thematicBreakDecorations(at point: CGPoint) -> [ThematicBreakDecoration] {
+        guard let ts = textStorage, let range = fragmentNSRange, range.length > 0 else { return [] }
         var hasThematic = false
         ts.enumerateAttribute(.thematicBreak, in: range, options: []) { value, _, stop in
             if value as? Bool == true {
@@ -497,9 +523,93 @@ final class MarkdownTextLayoutFragment: NSTextLayoutFragment {
                 stop.pointee = true
             }
         }
-        guard hasThematic else { return }
+        guard hasThematic else { return [] }
 
         let containerWidth = textLayoutManager?.textContainer?.size.width ?? layoutFragmentFrame.width
+        let textView = textLayoutManager?.textContainer?.textView
+        let font = (textView as? NativeTextView)?.baseFont
+            ?? textView?.font
+            ?? NSFont.systemFont(ofSize: NSFont.systemFontSize)
+        let containerX = point.x - layoutFragmentFrame.origin.x
+
+        // Walk each line fragment in this layout fragment and decorate those
+        // whose first character carries the marker. (HR tokens are always
+        // single-line, but the loop is robust if a future caller ever stacks
+        // several rules in one paragraph.)
+        var out: [ThematicBreakDecoration] = []
+        let fragLocation = range.location
+        for lineFragment in textLineFragments {
+            let lr = lineFragment.characterRange
+            let docStart = fragLocation + lr.location
+            // TextKit 2 appends a synthetic trailing empty line fragment whose
+            // characterRange lands at exactly `tsLen` — `attribute(at:)` needs
+            // a strictly in-bounds index, so skip the sentinel.
+            guard docStart < ts.length else { continue }
+            guard ts.attribute(.thematicBreak, at: docStart, effectiveRange: nil) as? Bool == true else { continue }
+            let tb = lineFragment.typographicBounds
+
+            if let mark = ts.attribute(.thematicBreakMark, at: docStart, effectiveRange: nil) as? String,
+               !mark.isEmpty {
+                let scale = (ts.attribute(.thematicBreakMarkScale, at: docStart, effectiveRange: nil) as? CGFloat) ?? 1
+                let markFont = scale == 1
+                    ? font
+                    : NSFont(descriptor: font.fontDescriptor, size: font.pointSize * scale) ?? font
+                let attrs: [NSAttributedString.Key: Any] = [.font: markFont]
+                let layoutSize = (mark as NSString).size(withAttributes: attrs)
+                let lineCenterY = point.y + tb.origin.y + tb.height / 2
+
+                // Ink bounds relative to the baseline, y up. Centering on this
+                // rather than on the layout box is what keeps a high-drawn
+                // glyph like `*` optically centered as the scale grows.
+                let line = CTLineCreateWithAttributedString(
+                    NSAttributedString(string: mark, attributes: attrs)
+                )
+                let ink = CTLineGetImageBounds(line, nil)
+                let inkIsUsable = !ink.isNull && ink.height > 0
+
+                // Flipped context: y grows downward, so ink that sits ABOVE the
+                // baseline lands at `baseline - ink.maxY`.
+                let baselineY = inkIsUsable
+                    ? lineCenterY + ink.midY
+                    : lineCenterY - layoutSize.height / 2 + markFont.ascender
+                // Centered on ink horizontally too: a mark's advance width
+                // includes side bearings that need not be symmetric, so
+                // centering the layout box can leave the ink visibly off-axis.
+                let layoutX = inkIsUsable
+                    ? containerX + containerWidth / 2 - ink.midX
+                    : containerX + (containerWidth - layoutSize.width) / 2
+                let inkRect = CGRect(
+                    x: inkIsUsable ? layoutX + ink.minX : layoutX,
+                    y: inkIsUsable ? baselineY - ink.maxY : lineCenterY - layoutSize.height / 2,
+                    width: inkIsUsable ? ink.width : layoutSize.width,
+                    height: inkIsUsable ? ink.height : layoutSize.height
+                )
+                out.append(ThematicBreakDecoration(
+                    rect: inkRect,
+                    mark: mark,
+                    font: markFont,
+                    drawOrigin: CGPoint(x: layoutX, y: baselineY - markFont.ascender)
+                ))
+            } else {
+                // tb.origin.y is already relative to this layout fragment.
+                let centerY = point.y + tb.origin.y + tb.height / 2
+                out.append(ThematicBreakDecoration(
+                    rect: CGRect(x: containerX, y: centerY - 0.5, width: containerWidth, height: 1),
+                    mark: nil,
+                    font: font,
+                    drawOrigin: CGPoint(x: containerX, y: centerY - 0.5)
+                ))
+            }
+        }
+        return out
+    }
+
+    /// Paint what `thematicBreakDecorations(at:)` worked out: a full-width rule,
+    /// or the configured mark centered in the container.
+    private func drawThematicBreaks(at point: CGPoint, in context: CGContext) {
+        let decorations = thematicBreakDecorations(at: point)
+        guard !decorations.isEmpty else { return }
+
         let theme = (textLayoutManager?.textContainer?.textView as? NativeTextView)?
             .configuration.theme ?? .default
 
@@ -508,34 +618,20 @@ final class MarkdownTextLayoutFragment: NSTextLayoutFragment {
         let nsContext = NSGraphicsContext(cgContext: context, flipped: true)
         NSGraphicsContext.current = nsContext
 
-        let strokeColor = theme.strikethroughColor.withAlphaComponent(0.4)
-        strokeColor.setFill()
-
-        // Walk each line fragment in this layout fragment and paint a
-        // band on those whose first character carries the marker. (HR
-        // tokens are always single-line, but the loop is robust if a
-        // future caller ever stacks several rules in one paragraph.)
-        let fragLocation = fragmentNSRange?.location ?? 0
-        for lineFragment in textLineFragments {
-            let lr = lineFragment.characterRange
-            let docStart = fragLocation + lr.location
-            // TextKit 2 appends a synthetic trailing empty line fragment whose
-            // characterRange lands at exactly `tsLen` — `attribute(at:)` needs
-            // a strictly in-bounds index, so skip the sentinel.
-            guard docStart < ts.length else { continue }
-            let isHR = ts.attribute(.thematicBreak, at: docStart, effectiveRange: nil) as? Bool == true
-            let tb = lineFragment.typographicBounds
-            if isHR {
-                // tb.origin.y is already relative to this layout fragment.
-                let centerY = point.y + tb.origin.y + tb.height / 2
-                let bandRect = CGRect(
-                    x: point.x - layoutFragmentFrame.origin.x,
-                    y: centerY - 0.5,
-                    width: containerWidth,
-                    height: 1
-                )
-                NSBezierPath(rect: bandRect).fill()
+        let ruleColor = theme.strikethroughColor.withAlphaComponent(0.4)
+        for decoration in decorations {
+            guard let mark = decoration.mark else {
+                ruleColor.setFill()
+                NSBezierPath(rect: decoration.rect).fill()
+                continue
             }
+            // Ink, not a hairline: the rule colour is deliberately faint and
+            // reads as a smudge on glyphs, so a mark takes the muted text
+            // colour the blockquote bars and hidden markers already use.
+            (mark as NSString).draw(
+                at: decoration.drawOrigin,
+                withAttributes: [.font: decoration.font, .foregroundColor: theme.mutedText]
+            )
         }
     }
 

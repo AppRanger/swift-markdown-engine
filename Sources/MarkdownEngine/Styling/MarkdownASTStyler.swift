@@ -181,6 +181,12 @@ enum MarkdownASTStyler {
          #"\[[^\]\r\n]+\]\([^)\r\n]*$"#, #"\[[^\]\r\n]+\]\(\)"#].compactMap { regex($0, false) }
 
     /// Tag a thematic-break line for a full-width rule (AST-driven); suppressed while the caret edits it.
+    ///
+    /// When `configuration.thematicBreak` maps this line's marker to a mark,
+    /// `.thematicBreakMark` rides along and the fragment draws that string
+    /// centered instead of the rule. Resolving here rather than at draw time
+    /// keeps the presentation decision next to the configuration (`Ctx` already
+    /// carries it) and leaves the fragment with nothing to look up.
     private static func styleThematicBreak(range: NSRange, ctx: Ctx, into attrs: inout [StyledRange]) {
         var hr = range
         while hr.length > 0 {
@@ -190,8 +196,40 @@ enum MarkdownASTStyler {
         }
         guard hr.length > 0,
               !(NSLocationInRange(ctx.caret, hr) || ctx.caret == NSMaxRange(hr)) else { return }
-        attrs.append((hr, [.foregroundColor: NSColor.clear, .thematicBreak: true]))
-        attrs.append((hr, [.paragraphStyle: NSMutableParagraphStyle()]))
+        var tags: [NSAttributedString.Key: Any] = [
+            .foregroundColor: NSColor.clear,
+            .thematicBreak: true,
+        ]
+        let mark = ctx.config.thematicBreak.mark(forMarker: thematicBreakMarker(in: hr, ctx: ctx))
+        if let mark {
+            tags[.thematicBreakMark] = mark.text
+            tags[.thematicBreakMarkScale] = mark.scale
+        }
+        attrs.append((hr, tags))
+
+        // A mark bigger than body size needs the line to grow with it, or it
+        // would be drawn over the paragraphs above and below (the fragment
+        // paints outside the line box; it does not reserve space).
+        let para = NSMutableParagraphStyle()
+        if let mark, mark.scale > 1 {
+            let height = ceil(ctx.baseLineHeight * mark.scale)
+            para.minimumLineHeight = height
+            para.maximumLineHeight = height
+        }
+        attrs.append((hr, [.paragraphStyle: para]))
+    }
+
+    /// The marker character of a thematic-break line: its first non-whitespace
+    /// character. Sound by construction — `BlockParser.isThematicBreak` accepts
+    /// the line only when every non-whitespace character is the same one of
+    /// `-`/`*`/`_`. Only trailing newlines are trimmed from the block range, so
+    /// leading indent has to be skipped here.
+    private static func thematicBreakMarker(in hr: NSRange, ctx: Ctx) -> unichar {
+        for offset in 0..<hr.length {
+            let c = ctx.ns.character(at: hr.location + offset)
+            if c != 0x20 && c != 0x09 { return c }
+        }
+        return 0
     }
 
     /// Ordered-list display numbers computed across the WHOLE document, keyed by
