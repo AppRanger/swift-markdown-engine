@@ -92,9 +92,14 @@ extension NativeTextViewCoordinator {
             guard !tv.hasMarkedText() else { return }
             if tv.string != lastSyncedText {
                 let rawText = tv.string
-                DispatchQueue.main.async {
-                    self.lastSyncedText = rawText
-                    self.text = rawText
+                if requiresSynchronousBindingPublication {
+                    lastSyncedText = rawText
+                    text = rawText
+                } else {
+                    DispatchQueue.main.async {
+                        self.lastSyncedText = rawText
+                        self.text = rawText
+                    }
                 }
             }
             if let bottomTextView = tv as? NativeTextView,
@@ -196,9 +201,14 @@ extension NativeTextViewCoordinator {
             }
 #endif
             if storageState.storage != self.lastSyncedText {
-                DispatchQueue.main.async {
-                    self.lastSyncedText = storageState.storage
-                    self.text = storageState.storage
+                if requiresSynchronousBindingPublication {
+                    lastSyncedText = storageState.storage
+                    text = storageState.storage
+                } else {
+                    DispatchQueue.main.async {
+                        self.lastSyncedText = storageState.storage
+                        self.text = storageState.storage
+                    }
                 }
             }
         }

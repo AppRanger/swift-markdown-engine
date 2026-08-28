@@ -225,6 +225,16 @@ NativeTextViewWrapper(
   replacement (e.g. an autocomplete result); the engine consumes it
   and clears the binding.
 
+For structural edits such as moving a block, configure
+`MarkdownEditorBus.applyTextReplacementRequest` and post a
+`MarkdownTextReplacementRequest` in `userInfo["request"]`. The request carries
+both the expected and complete resulting Markdown source; the engine validates
+the resulting rendered display before it edits native storage, preserving hidden
+wiki-link identifiers even when equal-looking links are reordered. Configure
+`textReplacementDidComplete` to receive its synchronous applied/rejected result
+and commit host state only after `.applied`. Use the target `NSTextView` as the
+notification object when the same bus can serve more than one editor.
+
 ### Height Behavior
 
 By default the editor scrolls internally. Set `heightBehavior` to

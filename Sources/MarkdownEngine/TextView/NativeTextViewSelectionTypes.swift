@@ -93,3 +93,55 @@ public struct InlineReplacementRequest: Sendable {
         self.isImageEmbedMode = isImageEmbedMode
     }
 }
+
+/// A guarded, synchronous replacement of a displayed editor range.
+///
+/// This is intended for structural commands such as moving a Markdown block.
+/// `expectedStorage` makes queued requests safe: the engine ignores a request
+/// after any intervening edit or document switch. `resultingStorage` is the
+/// complete post-edit Markdown source; the engine renders and validates it
+/// before changing native storage, including hidden wiki-link identifiers.
+/// Ranges are UTF-16 `NSRange` values in the rendered editor. Post this as
+/// `userInfo["request"]` on ``MarkdownEditorBus/applyTextReplacementRequest``.
+public struct MarkdownTextReplacementRequest: Sendable {
+    /// Correlates the completion acknowledgement with this request.
+    public let id: UUID
+    /// Identifies one editor instance. Supply a stable unique value when more
+    /// than one editor can display the same document.
+    public let editorId: String
+    public let documentId: String
+    public let expectedStorage: String
+    public let resultingStorage: String
+    public let displayRange: NSRange
+    public let replacementDisplay: String
+    public let resultingDisplaySelection: NSRange
+    public let undoActionName: String
+
+    public init(id: UUID = UUID(), editorId: String = "default", documentId: String, expectedStorage: String,
+                resultingStorage: String, displayRange: NSRange, replacementDisplay: String,
+                resultingDisplaySelection: NSRange, undoActionName: String) {
+        self.id = id
+        self.editorId = editorId
+        self.documentId = documentId
+        self.expectedStorage = expectedStorage
+        self.resultingStorage = resultingStorage
+        self.displayRange = displayRange
+        self.replacementDisplay = replacementDisplay
+        self.resultingDisplaySelection = resultingDisplaySelection
+        self.undoActionName = undoActionName
+    }
+}
+
+/// The synchronous outcome posted as `userInfo["result"]` after a
+/// ``MarkdownTextReplacementRequest`` is handled.
+public enum MarkdownTextReplacementResult: Sendable {
+    case applied(id: UUID, editorId: String, documentId: String, storage: String)
+    case rejected(id: UUID, editorId: String, documentId: String, reason: MarkdownTextReplacementRejection)
+}
+
+/// Why a structural text replacement was safely ignored.
+public enum MarkdownTextReplacementRejection: Sendable {
+    case wrongDocument, wrongEditor, notEditable, markedText, writingToolsActive
+    case invalidDisplayRange, mismatchedStorage, mismatchedCoordinates
+    case invalidSelection, deniedByTextView
+}

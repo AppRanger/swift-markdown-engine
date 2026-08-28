@@ -193,6 +193,13 @@ public struct NoOpLatexRenderer: LatexRenderer {
 /// posts the response notifications when supplied. Embedders that don't
 /// need cross-view formatting commands simply leave every name `nil`.
 public struct MarkdownEditorBus: Sendable {
+    /// Posted by the host UI to apply a validated structural edit without rebuilding
+    /// the editor. Expected `userInfo["request"] as? MarkdownTextReplacementRequest`.
+    /// Stale or cross-document requests are ignored.
+    public var applyTextReplacementRequest: Notification.Name?
+    /// Posted synchronously after a text replacement request with
+    /// `userInfo["result"] as? MarkdownTextReplacementResult`.
+    public var textReplacementDidComplete: Notification.Name?
     /// Posted by the host UI to request the engine apply bold styling.
     public var applyBoldRequest: Notification.Name?
     /// Posted by the host UI to request the engine apply italic styling.
@@ -257,6 +264,8 @@ public struct MarkdownEditorBus: Sendable {
     public var replaceAll: Notification.Name?
 
     public init(
+        applyTextReplacementRequest: Notification.Name? = nil,
+        textReplacementDidComplete: Notification.Name? = nil,
         applyBoldRequest: Notification.Name? = nil,
         applyItalicRequest: Notification.Name? = nil,
         applyHeadingRequest: Notification.Name? = nil,
@@ -280,6 +289,8 @@ public struct MarkdownEditorBus: Sendable {
         replaceCurrent: Notification.Name? = nil,
         replaceAll: Notification.Name? = nil
     ) {
+        self.applyTextReplacementRequest = applyTextReplacementRequest
+        self.textReplacementDidComplete = textReplacementDidComplete
         self.applyBoldRequest = applyBoldRequest
         self.applyItalicRequest = applyItalicRequest
         self.applyHeadingRequest = applyHeadingRequest

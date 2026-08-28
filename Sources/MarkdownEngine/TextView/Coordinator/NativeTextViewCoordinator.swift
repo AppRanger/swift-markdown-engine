@@ -19,6 +19,7 @@ import SwiftUI
 /// Notifications, Restyling, TextDelegate, WritingTools).
 public final class NativeTextViewCoordinator: NSObject, NSTextViewDelegate {
     var documentId: String?
+    var editorId: String = "default"
     /// Remembered scroll offset (`bounds.origin.y`) per `documentId` — saved on
     /// switch-away, restored on switch-back. Dies with the coordinator, so an
     /// embedder that unmounts the editor supplies the two closures below instead.
@@ -96,6 +97,10 @@ public final class NativeTextViewCoordinator: NSObject, NSTextViewDelegate {
     var isRebuildingDocument = false
     var lastSyncedText: String
     var isProgrammaticEdit: Bool = false
+    /// Lets a guarded programmatic transaction use the normal text delegate's
+    /// storage publisher synchronously, before SwiftUI can issue another view
+    /// update against the old binding.
+    var requiresSynchronousBindingPublication = false
     var isWritingToolsActive: Bool = false
     var wtStartDocumentId: String?
     weak var wtChildWindow: NSWindow?
@@ -325,6 +330,11 @@ public final class NativeTextViewCoordinator: NSObject, NSTextViewDelegate {
         let bus = configuration.services.bus
         let center = NotificationCenter.default
 
+        if let name = bus.applyTextReplacementRequest {
+            busObservers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] notification in
+                self?.handleTextReplacementNotification(notification)
+            })
+        }
         if let name = bus.applyBoldRequest {
             busObservers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] notification in
                 self?.handleBoldNotification(notification)

@@ -69,6 +69,9 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
     /// dropped only if the document's text changes while it is switched away. Set a
     /// stable, unique value per document so undo/replacements stay scoped.
     public var documentId: String
+    /// Stable identity used to target bus replacement requests to this editor.
+    /// Supply a unique value when rendering the same document in multiple views.
+    public var editorId: String
     /// When `false` the editor renders read-only with no caret.
     public var isEditable: Bool
     /// Optional paste hook. Return a Markdown image-embed string (e.g.
@@ -149,6 +152,7 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         fontName: String = "SF Pro",
         fontSize: CGFloat = 16,
         documentId: String = "default",
+        editorId: String = "default",
         isEditable: Bool = true,
         onPasteImage: ((NSPasteboard) -> String?)? = nil,
         onLinkClick: ((String) -> Void)? = nil,
@@ -175,6 +179,7 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         self.fontName = fontName
         self.fontSize = fontSize
         self.documentId = documentId
+        self.editorId = editorId
         self.isEditable = isEditable
         self.onPasteImage = onPasteImage
         self.onLinkClick = onLinkClick
@@ -401,6 +406,7 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         reconcileHeader(textView: textView, context: context)
 
         let isNodeSwitch = context.coordinator.documentId != documentId
+        context.coordinator.editorId = editorId
 
         // Refreshed here, not with the other callbacks at the bottom — teardown has
         // to reach the CURRENT closures even when the pass below returns early.
@@ -715,6 +721,7 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
             onInlineSelectionChange: onInlineSelectionChange
         )
         coordinator.documentId = documentId
+        coordinator.editorId = editorId
         coordinator.onPersistScrollOffset = onPersistScrollOffset
         coordinator.onTextMutation = onTextMutation
         coordinator.restoreScrollOffset = restoreScrollOffset

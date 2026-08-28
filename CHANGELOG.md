@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `MarkdownTextReplacementRequest` and `MarkdownEditorBus.applyTextReplacementRequest`:
+  a guarded synchronous native-storage replacement API for structural edits.
+  It validates the complete proposed source/display transition, preserves all
+  wiki-link id attributes (including same-display ID reorders), participates in
+  normal undo and binding synchronization, and acknowledges applied/rejected
+  requests without rebuilding the editor.
 - **Directive seam (parsing)**: opt-in named inline commands with typed
   arguments, for constructs that need a name and parameters rather than
   delimiters. A `MarkdownDirective` declares a name, a form — self-contained

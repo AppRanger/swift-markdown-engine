@@ -465,4 +465,164 @@ extension NativeTextViewCoordinator {
         textView.window?.makeFirstResponder(textView)
         textView.setSelectedRange(clampedCaret)
     }
+
+    /// Applies a storage-authoritative replacement in the live AppKit buffer.
+    /// The binding is updated in this transaction so SwiftUI never sees stale
+    /// source and rebuilds the editor (which briefly selects EOF).
+    @discardableResult
+    func applyTextReplacement(_ request: MarkdownTextReplacementRequest, to textView: NSTextView) -> MarkdownTextReplacementResult {
+        func rejected(_ reason: MarkdownTextReplacementRejection) -> MarkdownTextReplacementResult {
+            .rejected(id: request.id, editorId: request.editorId, documentId: request.documentId, reason: reason)
+        }
+        guard documentId == request.documentId else { return rejected(.wrongDocument) }
+        guard editorId == request.editorId else { return rejected(.wrongEditor) }
+        guard textView.isEditable else { return rejected(.notEditable) }
+        guard !textView.hasMarkedText() else { return rejected(.markedText) }
+        guard !isWritingToolsActive else { return rejected(.writingToolsActive) }
+
+        let display = textView.string
+        let displayNS = display as NSString
+        guard isValid(request.displayRange, in: displayNS) else { return rejected(.invalidDisplayRange) }
+
+        let currentState = WikiLinkService.makeStorageState(
+            from: display,
+            existingMetadata: wikiLinkMetadata,
+            textStorage: textView.textStorage
+        )
+        guard currentState.storage == request.expectedStorage else { return rejected(.mismatchedStorage) }
+        let proposedState: (display: String, metadata: [WikiLinkService.RangeKey: WikiLinkService.LinkMetadata])
+        if configuration.rawSourceMode {
+            proposedState = (request.resultingStorage, [:])
+        } else {
+            proposedState = WikiLinkService.makeDisplayState(from: request.resultingStorage) {
+                self.configuration.services.wikiLinks.name(forID: $0)
+            }
+        }
+        let proposedRange = NSRange(location: request.displayRange.location,
+                                    length: (request.replacementDisplay as NSString).length)
+        let expectedDisplay = displayNS.replacingCharacters(in: request.displayRange, with: request.replacementDisplay)
+        guard proposedState.display == expectedDisplay else { return rejected(.mismatchedCoordinates) }
+        let finalLength = (proposedState.display as NSString).length
+        let selection = request.resultingDisplaySelection
+        guard selection.location != NSNotFound, selection.location >= 0, selection.length >= 0,
+              NSMaxRange(selection) <= finalLength else { return rejected(.invalidSelection) }
+
+        // Prove the complete rendered proposal can round-trip to the exact
+        // storage source before touching the live NSTextView. This keeps every
+        // rejection atomic, including hidden-ID-only changes where the visible
+        // replacement string is unchanged.
+        let proposedTextStorage = NSTextStorage(string: proposedState.display)
+        applyWikiLinkMetadata(proposedState.metadata, to: proposedTextStorage)
+        let preflightState = WikiLinkService.makeStorageState(
+            from: proposedState.display,
+            existingMetadata: proposedState.metadata,
+            textStorage: proposedTextStorage
+        )
+        guard preflightState.storage == request.resultingStorage else {
+            return rejected(.mismatchedCoordinates)
+        }
+
+        textView.breakUndoCoalescing()
+        isProgrammaticEdit = true
+        requiresSynchronousBindingPublication = true
+        defer {
+            requiresSynchronousBindingPublication = false
+            isProgrammaticEdit = false
+        }
+        let previousSelection = textView.selectedRange()
+        let nativeUndoManager = textView.undoManager ?? undoManager(for: textView)
+        let undoRegistrationWasEnabled = nativeUndoManager?.isUndoRegistrationEnabled == true
+        if undoRegistrationWasEnabled { nativeUndoManager?.disableUndoRegistration() }
+        guard textView.shouldChangeText(in: request.displayRange, replacementString: request.replacementDisplay) else {
+            if undoRegistrationWasEnabled { nativeUndoManager?.enableUndoRegistration() }
+            return rejected(.deniedByTextView)
+        }
+
+        textView.textStorage?.replaceCharacters(in: request.displayRange, with: request.replacementDisplay)
+        // The full proposed rendering is authoritative, so an identical-display
+        // reorder can still move distinct hidden wiki IDs correctly. Refreshing
+        // the opaque attributes over the whole display also handles a token that
+        // crosses the character-splice boundary without ever rewriting its text.
+        if let textStorage = textView.textStorage {
+            let fullRange = NSRange(location: 0, length: textStorage.length)
+            textStorage.removeAttribute(.wikiLinkID, range: fullRange)
+            applyWikiLinkMetadata(proposedState.metadata, to: textStorage)
+        }
+        textView.didChangeText()
+        if undoRegistrationWasEnabled { nativeUndoManager?.enableUndoRegistration() }
+        textView.breakUndoCoalescing()
+
+        if let nativeTextView = textView as? NativeTextView {
+            nativeTextView.suppressAutoRevealOnce = true
+        }
+        textView.setSelectedRange(selection)
+
+        // `textDidChange` remains the sole storage/binding publisher. The flag
+        // above makes its normal publication synchronous for this transaction.
+        let settledStorage = lastSyncedText
+
+        // Register one model-aware inverse rather than relying on AppKit's
+        // character-only receipt. Attribute-only structural changes (for
+        // example swapping equal-looking wiki links with different IDs) need
+        // their complete storage source restored by undo and redo as well.
+        let oldDisplay = displayNS.substring(with: request.displayRange)
+        let inverse = MarkdownTextReplacementRequest(
+            editorId: request.editorId,
+            documentId: request.documentId,
+            expectedStorage: settledStorage,
+            resultingStorage: request.expectedStorage,
+            displayRange: proposedRange,
+            replacementDisplay: oldDisplay,
+            resultingDisplaySelection: previousSelection,
+            undoActionName: request.undoActionName
+        )
+        nativeUndoManager?.registerUndo(withTarget: self) { coordinator in
+            coordinator.applyTextReplacement(inverse, to: textView)
+        }
+        nativeUndoManager?.setActionName(request.undoActionName)
+        return .applied(id: request.id, editorId: request.editorId, documentId: request.documentId, storage: settledStorage)
+    }
+
+    func handleTextReplacementNotification(_ notification: Notification) {
+        guard let request = notification.userInfo?["request"] as? MarkdownTextReplacementRequest,
+              request.editorId == editorId,
+              !(notification.object is NSTextView)
+                || notification.object as? NSTextView === textView
+        else { return }
+        let result: MarkdownTextReplacementResult
+        if let textView {
+            result = applyTextReplacement(request, to: textView)
+        } else {
+            result = .rejected(id: request.id, editorId: request.editorId, documentId: request.documentId, reason: .wrongDocument)
+        }
+        if let name = configuration.services.bus.textReplacementDidComplete {
+            NotificationCenter.default.post(name: name, object: textView, userInfo: ["result": result])
+        }
+    }
+
+    private func isValid(_ range: NSRange, in string: NSString) -> Bool {
+        range.location != NSNotFound && range.location >= 0 && range.length >= 0
+            && NSMaxRange(range) <= string.length
+    }
+
+    private func applyWikiLinkMetadata(
+        _ metadata: [WikiLinkService.RangeKey: WikiLinkService.LinkMetadata],
+        to textStorage: NSTextStorage
+    ) {
+        let display = textStorage.string as NSString
+        for (key, link) in metadata {
+            guard let id = link.id, !id.isEmpty else { continue }
+            let tokenRange = NSRange(location: key.location, length: key.length)
+            guard isValid(tokenRange, in: display) else { continue }
+            let isImage = display.substring(with: tokenRange).hasPrefix("![[")
+            let openLength = isImage ? 3 : 2
+            let contentLength = max(0, tokenRange.length - openLength - 2)
+            guard contentLength > 0 else { continue }
+            textStorage.addAttribute(
+                .wikiLinkID,
+                value: id,
+                range: NSRange(location: tokenRange.location + openLength, length: contentLength)
+            )
+        }
+    }
 }
