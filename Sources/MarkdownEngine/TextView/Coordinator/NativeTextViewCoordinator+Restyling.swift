@@ -303,6 +303,7 @@ extension NativeTextViewCoordinator {
 
         parsedDocumentVersion &+= 1
         let parsed = ParsedDocument(
+            source: text,
             tokens: tokens,
             blocks: parseState.currentBlocks,
             codeTokens: codeTokens,

@@ -20,6 +20,9 @@ import SwiftUI
 public final class NativeTextViewCoordinator: NSObject, NSTextViewDelegate {
     var documentId: String?
     var editorId: String = "default"
+    /// Host-owned lifecycle identity used only by code-block overlay receipts.
+    /// Unlike `editorId`, it may change when the native editor is remounted.
+    var codeBlockReceiptSessionId: String = "default"
     /// Remembered scroll offset (`bounds.origin.y`) per `documentId` — saved on
     /// switch-away, restored on switch-back. Dies with the coordinator, so an
     /// embedder that unmounts the editor supplies the two closures below instead.
@@ -86,6 +89,7 @@ public final class NativeTextViewCoordinator: NSObject, NSTextViewDelegate {
     var onInlineSelectionChange: ((InlineSelectionState?) -> Void)?
     var onInlinePreviewKey: ((InlinePreviewKey) -> Bool)?
     var onCodeBlockSelectionChange: (([CodeBlockSelection]) -> Void)?
+    var onCodeBlockSelectionUpdate: ((CodeBlockSelectionUpdate) -> Void)?
     var didInitialFormatting: Bool = false
     /// One-shot guard so `updateCodeBlockSelection` only forces a full-document layout once per document.
     var didEnsureLayoutForCurrentDocument: Bool = false
@@ -180,7 +184,15 @@ public final class NativeTextViewCoordinator: NSObject, NSTextViewDelegate {
     /// nil = no span, use the theme.
     var resolvedCaretColor: NSColor?
 
-    var cachedCodeBlockTokens: [(index: Int, token: MarkdownToken)] = []
+    struct CodeBlockTokenCache {
+        let documentId: String
+        let source: String
+        let parseVersion: UInt64
+        let tokens: [(index: Int, token: MarkdownToken)]
+    }
+    /// Tokens are valid only for the exact document/source/parse receipt that
+    /// created them. Scroll-only refreshes must never reinterpret them.
+    var cachedCodeBlockTokenCache: CodeBlockTokenCache?
     /// Dedupe key of the last emitted code-block selections — identical
     /// (parse version, scroll, width, active-code set) means identical output,
     /// so the second per-keystroke invocation can skip the geometry work.
@@ -232,6 +244,10 @@ public final class NativeTextViewCoordinator: NSObject, NSTextViewDelegate {
     }
 
     struct ParsedDocument {
+        /// Exact display source consumed by this parse. Code-block overlay
+        /// receipts use this to reject a parsed result delivered after native
+        /// storage has moved on.
+        let source: String
         let tokens: [MarkdownToken]
         /// The block list the tokens were derived from — handed to the restyle
         /// so DocumentAST.parse consumes it instead of re-deriving blocks

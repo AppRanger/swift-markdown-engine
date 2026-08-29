@@ -13,22 +13,73 @@
 import AppKit
 
 extension NativeTextViewCoordinator {
+    /// Clears code overlays and their parse receipt before a document switch.
+    /// This is intentionally synchronous: the native text view still contains
+    /// the outgoing source until the incoming rebuild begins.
+    func invalidateCodeBlockSelectionCache() {
+        let source = textView?.string ?? ""
+        let parseVersion = cachedCodeBlockTokenCache?.parseVersion ?? parsedDocumentVersion
+        let outgoingDocumentId = cachedCodeBlockTokenCache?.documentId ?? documentId
+        cachedCodeBlockTokenCache = nil
+        lastCodeSelKey = nil
+        publishCodeBlockSelection(
+            [],
+            documentId: outgoingDocumentId,
+            source: source,
+            parseVersion: parseVersion
+        )
+    }
+
     func updateCodeBlockSelection(textView: NSTextView, parsed: ParsedDocument? = nil) {
-        guard let textContainer = textView.textContainer else {
-            onCodeBlockSelectionChange?([])
+        guard let textContainer = textView.textContainer,
+              let documentId else {
+            publishCodeBlockSelection([], documentId: nil, source: textView.string, parseVersion: parsedDocumentVersion)
             return
         }
 
+        let source = textView.string
+        guard !configuration.rawSourceMode else {
+            cachedCodeBlockTokenCache = nil
+            lastCodeSelKey = nil
+            publishCodeBlockSelection([], documentId: documentId, source: source, parseVersion: parsed?.version ?? parsedDocumentVersion)
+            return
+        }
+        let tokenCache: CodeBlockTokenCache
         if let parsed {
+            guard parsed.source == source else {
+                // A caller can hold a parsed result across an async hop. It
+                // is not safe to relabel that result with the newer native
+                // source, even when fenced contents happen to match.
+                cachedCodeBlockTokenCache = nil
+                lastCodeSelKey = nil
+                publishCodeBlockSelection([], documentId: documentId, source: source, parseVersion: parsed.version)
+                return
+            }
             // Indexed pairs come from the parse's single classification pass —
             // no per-call full-token filter.
-            cachedCodeBlockTokens = parsed.codeBlockTokensWithIndices
-        } else if cachedCodeBlockTokens.isEmpty {
-            onCodeBlockSelectionChange?([])
-            return
+            tokenCache = CodeBlockTokenCache(
+                documentId: documentId,
+                source: parsed.source,
+                parseVersion: parsed.version,
+                tokens: parsed.codeBlockTokensWithIndices
+            )
+            cachedCodeBlockTokenCache = tokenCache
+        } else {
+            // A no-parse refresh is allowed only for the exact native source
+            // and document that created its tokens. Fail closed after any
+            // switch or delayed callback instead of guessing from equal code.
+            guard let cached = cachedCodeBlockTokenCache,
+                  cached.documentId == documentId,
+                  cached.source == source else {
+                cachedCodeBlockTokenCache = nil
+                lastCodeSelKey = nil
+                publishCodeBlockSelection([], documentId: documentId, source: source, parseVersion: parsedDocumentVersion)
+                return
+            }
+            tokenCache = cached
         }
 
-        let nsText = textView.string as NSString
+        let nsText = source as NSString
         let scrollOffset = textView.enclosingScrollView?.contentView.bounds.origin ?? .zero
 
         // Identical inputs → identical selections. The delegate path calls
@@ -73,7 +124,7 @@ extension NativeTextViewCoordinator {
             return NSRange(location: start, length: tlm.offset(from: vp.location, to: vp.endLocation))
         }()
 
-        let selections: [CodeBlockSelection] = cachedCodeBlockTokens.compactMap { originalIndex, token in
+        let selections: [CodeBlockSelection] = tokenCache.tokens.compactMap { originalIndex, token in
             guard !activeTokenIndices.contains(originalIndex) else { return nil }
             // Cached tokens can be stale for one async hop after a document swap
             // (shorter new text, queued update still holding the old parse). Skip
@@ -89,11 +140,38 @@ extension NativeTextViewCoordinator {
             return CodeBlockSelection(
                 id: originalIndex,
                 rect: boundingRect,
-                language: MarkdownTokenizer.extractLanguage(from: token, in: textView.string),
-                code: nsText.substring(with: token.contentRange)
+                language: MarkdownTokenizer.extractLanguage(from: token, in: source),
+                code: nsText.substring(with: token.contentRange),
+                sourceRange: token.range
             )
         }
 
+        publishCodeBlockSelection(
+            selections,
+            documentId: documentId,
+            source: source,
+            parseVersion: tokenCache.parseVersion
+        )
+    }
+
+    private func publishCodeBlockSelection(
+        _ selections: [CodeBlockSelection],
+        documentId: String?,
+        source: String,
+        parseVersion: UInt64
+    ) {
         onCodeBlockSelectionChange?(selections)
+        if let documentId {
+            onCodeBlockSelectionUpdate?(
+                CodeBlockSelectionUpdate(
+                    editorId: editorId,
+                    editorSessionId: codeBlockReceiptSessionId,
+                    documentId: documentId,
+                    source: source,
+                    parseVersion: parseVersion,
+                    selections: selections
+                )
+            )
+        }
     }
 }

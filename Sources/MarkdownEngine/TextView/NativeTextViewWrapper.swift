@@ -72,6 +72,9 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
     /// Stable identity used to target bus replacement requests to this editor.
     /// Supply a unique value when rendering the same document in multiple views.
     public var editorId: String
+    /// Lifecycle identity for receipt-bearing code-block callbacks. Embedders
+    /// that remount an editor while retaining host state should change this.
+    public var codeBlockReceiptSessionId: String
     /// When `false` the editor renders read-only with no caret.
     public var isEditable: Bool
     /// Optional paste hook. Return a Markdown image-embed string (e.g.
@@ -102,6 +105,10 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
     /// Fires when the set of visible code blocks changes, so embedders can
     /// overlay copy buttons (see ``CodeBlockButton``).
     public var onCodeBlockSelectionChange: (([CodeBlockSelection]) -> Void)?
+    /// Fires together with ``onCodeBlockSelectionChange`` and includes the
+    /// exact document/source/parse receipt for the selections. Prefer this for
+    /// asynchronous overlay work; the legacy callback remains source-compatible.
+    public var onCodeBlockSelectionUpdate: ((CodeBlockSelectionUpdate) -> Void)?
     /// Fires after the user toggles any of the three spell/grammar/auto-correction
     /// menu items. Embedders persist the policy and pass it back via
     /// ``MarkdownEditorConfiguration/spellChecking`` on next launch.
@@ -153,6 +160,7 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         fontSize: CGFloat = 16,
         documentId: String = "default",
         editorId: String = "default",
+        codeBlockReceiptSessionId: String = "default",
         isEditable: Bool = true,
         onPasteImage: ((NSPasteboard) -> String?)? = nil,
         onLinkClick: ((String) -> Void)? = nil,
@@ -162,6 +170,7 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         onInlineSelectionChange: ((InlineSelectionState?) -> Void)? = nil,
         onInlinePreviewKey: ((InlinePreviewKey) -> Bool)? = nil,
         onCodeBlockSelectionChange: (([CodeBlockSelection]) -> Void)? = nil,
+        onCodeBlockSelectionUpdate: ((CodeBlockSelectionUpdate) -> Void)? = nil,
         onSpellCheckingPolicyChanged: ((SpellCheckingPolicy) -> Void)? = nil,
         placeholder: NSAttributedString? = nil,
         header: AnyView? = nil,
@@ -180,6 +189,7 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         self.fontSize = fontSize
         self.documentId = documentId
         self.editorId = editorId
+        self.codeBlockReceiptSessionId = codeBlockReceiptSessionId
         self.isEditable = isEditable
         self.onPasteImage = onPasteImage
         self.onLinkClick = onLinkClick
@@ -189,6 +199,7 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         self.onInlineSelectionChange = onInlineSelectionChange
         self.onInlinePreviewKey = onInlinePreviewKey
         self.onCodeBlockSelectionChange = onCodeBlockSelectionChange
+        self.onCodeBlockSelectionUpdate = onCodeBlockSelectionUpdate
         self.onSpellCheckingPolicyChanged = onSpellCheckingPolicyChanged
         self.placeholder = placeholder
         self.header = header
@@ -339,6 +350,7 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         context.coordinator.onInlineSelectionChange = onInlineSelectionChange
         context.coordinator.onInlinePreviewKey = onInlinePreviewKey
         context.coordinator.onCodeBlockSelectionChange = onCodeBlockSelectionChange
+        context.coordinator.onCodeBlockSelectionUpdate = onCodeBlockSelectionUpdate
 
         textView.recalcOverscroll(for: scrollView)
         textView.setPlaceholder(placeholder)
@@ -407,11 +419,14 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
 
         let isNodeSwitch = context.coordinator.documentId != documentId
         context.coordinator.editorId = editorId
+        context.coordinator.codeBlockReceiptSessionId = codeBlockReceiptSessionId
 
         // Refreshed here, not with the other callbacks at the bottom — teardown has
         // to reach the CURRENT closures even when the pass below returns early.
         context.coordinator.onPersistScrollOffset = onPersistScrollOffset
         context.coordinator.restoreScrollOffset = restoreScrollOffset
+        context.coordinator.onCodeBlockSelectionChange = onCodeBlockSelectionChange
+        context.coordinator.onCodeBlockSelectionUpdate = onCodeBlockSelectionUpdate
 
         // Drop remembered offsets for documents no longer retained (always keep
         // the current one). Only rebuilds the dict when something must go.
@@ -493,6 +508,10 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         if rawSourceModeChanged {
             context.coordinator.configuration.rawSourceMode = configuration.rawSourceMode
             textView.configuration.rawSourceMode = configuration.rawSourceMode
+            // Raw source intentionally has no rendered-code affordances. Drop
+            // a rich-mode receipt synchronously rather than leaving its
+            // controls visible until the rebuild's deferred refresh.
+            context.coordinator.invalidateCodeBlockSelectionCache()
             textView.breakUndoCoalescing()
             context.coordinator.undoManagers[documentId]?.removeAllActions()
             context.coordinator.didInitialFormatting = false
@@ -518,6 +537,10 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         // runs against the old one.
         let newExtensionFingerprint = configuration.extensionRegistry.fingerprint
         if newExtensionFingerprint != context.coordinator.configuration.extensionRegistry.fingerprint {
+            // Any existing code-block receipt was produced by the outgoing
+            // grammar. Clear it before installing the new registry so a
+            // scroll/resize callback cannot briefly reuse those tokens.
+            context.coordinator.invalidateCodeBlockSelectionCache()
             context.coordinator.configuration.extensions = configuration.extensions
             textView.configuration.extensions = configuration.extensions
             context.coordinator.configuration.directives = configuration.directives
@@ -591,6 +614,10 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
             context.coordinator.didInitialFormatting = false
         }
         if isNodeSwitch {
+            // The text view still contains the outgoing document until the
+            // rebuild below. Clear its overlays now so no queued refresh can
+            // reuse them under the incoming document identity.
+            context.coordinator.invalidateCodeBlockSelectionCache()
             // Save the outgoing document's scroll position — unless it just left
             // the retained set, in which case let it reset to top next time.
             if let outgoingId = context.coordinator.documentId {
@@ -616,6 +643,14 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
             textView.breakUndoCoalescing()
             context.coordinator.documentId = documentId
             context.coordinator.armScrollRestore(for: documentId)
+            // ParsedDocument cache hits are valid only inside one document.
+            // Even identical display source must mint a new parse version for
+            // the incoming receipt so hosts can distinguish the switch.
+            context.coordinator.cachedParsedDocument = nil
+            context.coordinator.cachedParsedText = nil
+            context.coordinator.cachedParsedLength = -1
+            context.coordinator.cachedParseGeneration = .max
+            context.coordinator.activeTokenMemo = nil
             // Drop the incoming document's undo stack if its text changed while
             // switched away — its recorded ranges are now stale.
             context.coordinator.invalidateUndoIfContentDiverged(for: documentId, incomingText: text)
@@ -699,7 +734,14 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         // Document rebuilds bypass textDidChange — re-derive emptiness here.
         textView.refreshPlaceholderVisibility()
         DispatchQueue.main.async {
-            context.coordinator.updateCodeBlockSelection(textView: textView)
+            if context.coordinator.configuration.rawSourceMode {
+                // Raw source has no rendered-code affordances. Avoid paying
+                // for a parse merely to publish the already-empty state.
+                context.coordinator.updateCodeBlockSelection(textView: textView)
+            } else {
+                let parsed = context.coordinator.parsedDocument(for: textView.string)
+                context.coordinator.updateCodeBlockSelection(textView: textView, parsed: parsed)
+            }
         }
 
         context.coordinator.onCaretRectChange = onCaretRectChange
@@ -708,6 +750,7 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         context.coordinator.onInlineSelectionChange = onInlineSelectionChange
         context.coordinator.onInlinePreviewKey = onInlinePreviewKey
         context.coordinator.onCodeBlockSelectionChange = onCodeBlockSelectionChange
+        context.coordinator.onCodeBlockSelectionUpdate = onCodeBlockSelectionUpdate
         context.coordinator.didInitialFormatting = true
     }
 
@@ -722,6 +765,7 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         )
         coordinator.documentId = documentId
         coordinator.editorId = editorId
+        coordinator.codeBlockReceiptSessionId = codeBlockReceiptSessionId
         coordinator.onPersistScrollOffset = onPersistScrollOffset
         coordinator.onTextMutation = onTextMutation
         coordinator.restoreScrollOffset = restoreScrollOffset
@@ -732,6 +776,7 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         coordinator.lastImageFingerprint = configuration.services.images.fingerprint()
         coordinator.lastWikiFingerprint = configuration.services.wikiLinks.fingerprint()
         coordinator.onCodeBlockSelectionChange = onCodeBlockSelectionChange
+        coordinator.onCodeBlockSelectionUpdate = onCodeBlockSelectionUpdate
         coordinator.onInlinePreviewKey = onInlinePreviewKey
         coordinator.userPrefersContinuousSpellChecking = configuration.spellChecking.continuousSpellChecking
         coordinator.userPrefersGrammarChecking = configuration.spellChecking.grammarChecking

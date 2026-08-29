@@ -24,12 +24,61 @@ public struct CodeBlockSelection: Identifiable, Sendable {
     /// Plain text content of the block, suitable for putting on the
     /// pasteboard.
     public let code: String
+    /// Exact UTF-16 range of the complete fenced source token that produced
+    /// this selection. `nil` preserves source compatibility for selections
+    /// constructed by embedders before source receipts were introduced.
+    public let sourceRange: NSRange?
 
-    public init(id: Int, rect: CGRect, language: String?, code: String) {
+    public init(
+        id: Int,
+        rect: CGRect,
+        language: String?,
+        code: String,
+        sourceRange: NSRange? = nil
+    ) {
         self.id = id
         self.rect = rect
         self.language = language
         self.code = code
+        self.sourceRange = sourceRange
+    }
+}
+
+/// One coherent code-block overlay update from the native editor.
+///
+/// The receipt binds every selection to the exact document, native display
+/// source, and parse version that produced it. An embedder that performs work
+/// asynchronously can reject a receipt unless all three still match its
+/// current editor state.
+public struct CodeBlockSelectionUpdate: Sendable {
+    /// The specific editor instance that produced this receipt.
+    public let editorId: String
+    /// Host-provided lifecycle identity for this native editor presentation.
+    /// This distinguishes remounted coordinators whose parse counters restart.
+    public let editorSessionId: String
+    /// The document currently loaded by the native editor.
+    public let documentId: String
+    /// Exact native display source snapshot used to parse the selections.
+    public let source: String
+    /// The engine parse version that produced `selections`.
+    public let parseVersion: UInt64
+    /// Visible, non-active fenced code blocks for this source snapshot.
+    public let selections: [CodeBlockSelection]
+
+    public init(
+        editorId: String = "default",
+        editorSessionId: String = "default",
+        documentId: String,
+        source: String,
+        parseVersion: UInt64,
+        selections: [CodeBlockSelection]
+    ) {
+        self.editorId = editorId
+        self.editorSessionId = editorSessionId
+        self.documentId = documentId
+        self.source = source
+        self.parseVersion = parseVersion
+        self.selections = selections
     }
 }
 
